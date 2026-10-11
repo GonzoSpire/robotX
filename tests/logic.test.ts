@@ -56,7 +56,7 @@ describe('каталог оружий', () => {
 
 describe('карточки левел-апа', () => {
   it('не предлагает новое оружие при полном слоте', () => {
-    const sim = new RunSim(1);
+    const sim = new RunSim(undefined, 1);
     sim.addWeapon('laser');
     sim.addWeapon('missiles');
     sim.addWeapon('drones');
@@ -66,21 +66,21 @@ describe('карточки левел-апа', () => {
   });
 
   it('не предлагает апгрейд максимального уровня', () => {
-    const sim = new RunSim(1);
+    const sim = new RunSim(undefined, 1);
     sim.weapons[0].level = WEAPONS.autogun.maxLevel;
     const pool = buildCardPool(sim);
     expect(pool.some((c) => c.kind === 'weapon-up' && c.weapon === 'autogun')).toBe(false);
   });
 
   it('не предлагает пассивку с максимумом стаков', () => {
-    const sim = new RunSim(1);
+    const sim = new RunSim(undefined, 1);
     for (let i = 0; i < 5; i++) sim.addPassiveStack('damage');
     const pool = buildCardPool(sim);
     expect(pool.some((c) => c.kind === 'passive' && c.passive === 'damage')).toBe(false);
   });
 
   it('rollCards даёт до трёх разных карточек', () => {
-    const sim = new RunSim(1);
+    const sim = new RunSim(undefined, 1);
     const rng = new Rng(42);
     const cards = rollCards(rng, sim);
     expect(cards.length).toBe(3);
@@ -89,7 +89,7 @@ describe('карточки левел-апа', () => {
   });
 
   it('пул покрывает все пассивки на старте', () => {
-    const sim = new RunSim(1);
+    const sim = new RunSim(undefined, 1);
     const pool = buildCardPool(sim);
     for (const id of PASSIVE_IDS) {
       expect(pool.some((c) => c.kind === 'passive' && c.passive === id)).toBe(true);
@@ -101,8 +101,8 @@ describe('симуляция забега', () => {
   const input = { moveX: 0, moveY: 0, dash: false, shield: false };
 
   it('детерминирована по сиду', () => {
-    const a = new RunSim(1234);
-    const b = new RunSim(1234);
+    const a = new RunSim(undefined, 1234);
+    const b = new RunSim(undefined, 1234);
     for (let i = 0; i < 300; i++) {
       a.tick(1 / 60, input);
       b.tick(1 / 60, input);
@@ -113,20 +113,20 @@ describe('симуляция забега', () => {
   });
 
   it('спавнит мобов со временем', () => {
-    const sim = new RunSim(7);
+    const sim = new RunSim(undefined, 7);
     for (let i = 0; i < 600; i++) sim.tick(1 / 60, input);
     expect(sim.enemies.length).toBeGreaterThan(0);
   });
 
   it('контактный урон работает', () => {
-    const sim = new RunSim(9);
+    const sim = new RunSim(undefined, 9);
     sim.spawnEnemy('chaser', 2, 0);
     for (let i = 0; i < 240; i++) sim.tick(1 / 60, input);
     expect(sim.player.hp).toBeLessThan(100);
   });
 
   it('смерть игрока завершает забег', () => {
-    const sim = new RunSim(11);
+    const sim = new RunSim(undefined, 11);
     sim.player.shieldT = 0;
     sim.player.iframe = 0;
     sim.spawnEnemy('boss', 1, 0);
@@ -135,7 +135,7 @@ describe('симуляция забега', () => {
   });
 
   it('убийство даёт кристалл опыта, подбор — опыт', () => {
-    const sim = new RunSim(13);
+    const sim = new RunSim(undefined, 13);
     const e = sim.spawnEnemy('chaser', 0.5, 0);
     const st = sim.stats();
     sim.damageEnemy(e, 9999, st);
@@ -147,7 +147,7 @@ describe('симуляция забега', () => {
   });
 
   it('щит поглощает урон без потери HP', () => {
-    const sim = new RunSim(15);
+    const sim = new RunSim(undefined, 15);
     sim.player.shieldT = 2;
     sim.spawnEnemy('chaser', 1, 0);
     for (let i = 0; i < 180; i++) sim.tick(1 / 60, input);
@@ -155,7 +155,7 @@ describe('симуляция забега', () => {
   });
 
   it('победа после убийства босса', () => {
-    const sim = new RunSim(17);
+    const sim = new RunSim(undefined, 17);
     const boss = sim.spawnEnemy('boss', 3, 3);
     const st = sim.stats();
     sim.damageEnemy(boss, 999999, st);
@@ -165,7 +165,7 @@ describe('симуляция забега', () => {
   });
 
   it('рывок даёт неуязвимость и кулдаун', () => {
-    const sim = new RunSim(19);
+    const sim = new RunSim(undefined, 19);
     sim.tick(1 / 60, { ...input, dash: true });
     expect(sim.player.dashCd).toBeGreaterThan(3);
     expect(sim.player.dashT).toBeGreaterThan(0);

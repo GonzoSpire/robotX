@@ -1,5 +1,5 @@
-import type { GameSave } from '../core/save';
 import type { Card } from '../run/cards';
+import { PART_BY_ID } from '../meta/parts';
 
 export interface CardView {
   icon: string;
@@ -15,10 +15,10 @@ export interface ResultData {
   kills: number;
   scrap: number;
   record: boolean;
+  blueprints: string[];
 }
 
 export interface ScreensCallbacks {
-  onStartRun: () => void;
   onRetry: () => void;
   onToHangar: () => void;
   onResume: () => void;
@@ -31,20 +31,18 @@ function fmtTime(sec: number): string {
   return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
 }
 
-/** Оверлейные экраны: ангар, карточки, пауза, результаты. */
+/** Оверлейные экраны: карточки, пауза, результаты. */
 export class Screens {
-  private readonly hangar: HTMLElement;
   private readonly levelup: HTMLElement;
   private readonly pause: HTMLElement;
   private readonly results: HTMLElement;
   private keyListener: ((e: KeyboardEvent) => void) | null = null;
 
   constructor(uiRoot: HTMLElement, private readonly cb: ScreensCallbacks) {
-    this.hangar = this.mk('hangar-screen', 'screen');
     this.levelup = this.mk('levelup-screen', 'screen');
     this.pause = this.mk('pause-screen', 'screen');
     this.results = this.mk('results-screen', 'screen');
-    uiRoot.append(this.hangar, this.levelup, this.pause, this.results);
+    uiRoot.append(this.levelup, this.pause, this.results);
   }
 
   private mk(id: string, cls: string): HTMLElement {
@@ -55,35 +53,8 @@ export class Screens {
   }
 
   hideAll(): void {
-    for (const el of [this.hangar, this.levelup, this.pause, this.results]) el.classList.remove('show');
+    for (const el of [this.levelup, this.pause, this.results]) el.classList.remove('show');
     this.clearKeyListener();
-  }
-
-  // ---------- ангар ----------
-
-  showHangar(save: GameSave): void {
-    this.hangar.innerHTML = `
-      <div class="panel">
-        <div class="game-title">ROBOT<em>X</em></div>
-        <div class="subtitle">роглайк-забег · прототип M2</div>
-        <div class="stat-grid">
-          <div class="stat-cell"><b>⚙ ${save.scrap}</b><small>СКРАП</small></div>
-          <div class="stat-cell"><b>${fmtTime(save.bestTimeSec)}</b><small>ЛУЧШЕЕ ВРЕМЯ</small></div>
-          <div class="stat-cell"><b>☠ ${save.bestKills}</b><small>РЕКОРД УБИЙСТВ</small></div>
-          <div class="stat-cell"><b>${save.totalRuns}</b><small>ЗАБЕГОВ</small></div>
-        </div>
-        <button class="btn btn-primary" id="start-btn">НАЧАТЬ ЗАБЕГ</button>
-        <div class="controls-hint">
-          <span class="key-chip">WASD / стик — движение</span>
-          <span class="key-chip">SPACE ⇢ рывок</span>
-          <span class="key-chip">E ⛨ щит</span>
-          <span class="key-chip">ESC — пауза</span>
-        </div>
-        <div class="footnote">10 минут волн → ЯДРО-ТИТАН. Скрап остаётся после забега.<br/>Ангар и конструктор робота — в следующем обновлении (M3).</div>
-      </div>
-    `;
-    this.hangar.classList.add('show');
-    this.hangar.querySelector('#start-btn')!.addEventListener('click', this.cb.onStartRun);
   }
 
   // ---------- карточки ----------
@@ -157,6 +128,7 @@ export class Screens {
   // ---------- результаты ----------
 
   showResults(d: ResultData): void {
+    const bpNames = d.blueprints.map((id) => PART_BY_ID[id]?.name ?? id);
     this.results.innerHTML = `
       <div class="panel" style="max-width:420px">
         <div class="result-title ${d.won ? 'win' : 'lose'}">${d.won ? 'ПОБЕДА' : 'РОБОТ УНИЧТОЖЕН'}</div>
@@ -166,6 +138,7 @@ export class Screens {
           <div class="result-row"><span>Уровень</span><b>${d.level}</b></div>
           <div class="result-row"><span>Убийств</span><b>${d.kills}</b></div>
           <div class="result-row"><span>Скрап</span><b class="gain">+${d.scrap} ⚙</b></div>
+          ${bpNames.length ? `<div class="result-row"><span>Чертежи</span><b class="gain">+${bpNames.length}</b></div><div class="footnote">${bpNames.join(' · ')}</div>` : ''}
         </div>
         <div class="btn-row">
           <button class="btn btn-primary" id="retry-btn">ЕЩЁ ЗАБЕГ</button>

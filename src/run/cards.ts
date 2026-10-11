@@ -8,14 +8,14 @@ export type Card =
   | { kind: 'weapon-up'; weapon: WeaponId }
   | { kind: 'passive'; passive: PassiveId };
 
-/** Лимит оружий в одном забеге (в M3 его будет задавать шасси). */
+/** Лимит оружий в забеге по умолчанию; реальный лимит задаёт шасси (sim.weaponSlots). */
 export const RUN_WEAPON_SLOTS = 4;
 
 export function buildCardPool(sim: RunSim): Card[] {
   const pool: Card[] = [];
   const owned = new Map(sim.weapons.map((w) => [w.id, w.level]));
 
-  if (sim.weapons.length < RUN_WEAPON_SLOTS) {
+  if (sim.weapons.length < sim.weaponSlots) {
     for (const id of WEAPON_IDS) if (!owned.has(id)) pool.push({ kind: 'weapon-new', weapon: id });
   }
   for (const [id, level] of owned) {

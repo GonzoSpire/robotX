@@ -314,6 +314,11 @@ export class RunScene {
             octaGeo(0.2),
             new THREE.MeshBasicMaterial({ color: 0x3ef0d0 }),
           );
+        } else if (gem.kind === 'blueprint') {
+          mesh = new THREE.Mesh(
+            octaGeo(0.26),
+            new THREE.MeshBasicMaterial({ color: 0x9ad8ff }),
+          );
         } else {
           mesh = new THREE.Mesh(
             boxGeo(0.24, 0.24, 0.24),
@@ -456,6 +461,11 @@ export class RunScene {
         break;
       case 'scrap':
         this.onFloater(p.x, p.y, `+${ev.amount} ⚙`, 'scrap');
+        break;
+      case 'blueprint':
+        this.onFloater(p.x, p.y, '★ ЧЕРТЁЖ ★', 'levelup');
+        this.spawnRing(p.x, p.y, 2, 0x9ad8ff);
+        this.shake = 0.2;
         break;
       case 'bossWarn':
         this.onFloater(p.x, p.y, '!! ЯДРО-ТИТАН !!', 'boss');

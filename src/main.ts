@@ -7,7 +7,10 @@ import { RenderCore } from './render/core';
 import { HangarScene } from './render/hangarScene';
 import { RunScene } from './render/runScene';
 import { applyCard, cardDesc, cardIcon, cardTitle, rollCards, type Card } from './run/cards';
-import { RunSim, type InputSnapshot } from './run/sim';
+import { RunSim, defaultStart, type InputSnapshot, type RunStartConfig } from './run/sim';
+import { computeLoadoutStats } from './meta/loadout';
+import { blueprintDropPool } from './meta/crafting';
+import { HangarScreen } from './ui/hangar';
 import { Hud } from './ui/hud';
 import { Screens, type CardView } from './ui/screens';
 
@@ -23,6 +26,7 @@ class GameApp {
 
   private readonly core: RenderCore;
   private readonly hangarScene: HangarScene;
+  private readonly hangar: HangarScreen;
   private readonly input: InputManager;
   private readonly hud: Hud;
   private readonly screens: Screens;
@@ -41,8 +45,8 @@ class GameApp {
     this.hud = new Hud(ui, () => this.togglePause());
     this.hud.hide();
     this.input.setAbilitiesVisible(false);
+    this.hangar = new HangarScreen(ui, this.save, { onStartRun: () => this.startRun() });
     this.screens = new Screens(ui, {
-      onStartRun: () => this.startRun(),
       onRetry: () => this.startRun(),
       onToHangar: () => this.toHangar(),
       onResume: () => this.togglePause(false),
@@ -61,7 +65,7 @@ class GameApp {
     });
     window.addEventListener('contextmenu', (e) => e.preventDefault());
 
-    this.screens.showHangar(this.save);
+    this.hangar.show();
     this.loop.start();
 
     if (import.meta.env.DEV) {
@@ -69,8 +73,24 @@ class GameApp {
     }
   }
 
+  /** Конфиг старта забега из сборки ангара + пилота. */
+  private buildStart(): RunStartConfig {
+    const stats = computeLoadoutStats(this.save.loadout, this.save.pilot);
+    if (!stats.valid) return defaultStart();
+    return {
+      maxHp: stats.hp,
+      speed: stats.speed,
+      pickup: stats.pickup,
+      weaponSlots: stats.weaponSlots,
+      weapons: stats.weapons,
+      fixed: stats.fixed,
+      blueprintPool: blueprintDropPool(this.save.owned, this.save.blueprints),
+      startLevelBonus: 0,
+    };
+  }
+
   private startRun(): void {
-    this.sim = new RunSim(this.rng.int(2 ** 31));
+    this.sim = new RunSim(this.buildStart(), this.rng.int(2 ** 31));
     this.runScene?.dispose();
     this.runScene = new RunScene(this.core, (x, y, text, cls) => {
       const scene = this.runScene;
@@ -82,6 +102,7 @@ class GameApp {
     this.levelUpOpen = false;
     this.resultsShown = false;
     this.screens.hideAll();
+    this.hangar.hide();
     this.hud.show();
     this.input.setAbilitiesVisible(true);
     this.mode = 'run';
@@ -94,8 +115,8 @@ class GameApp {
     this.runScene = null;
     this.hud.hide();
     this.screens.hideAll();
-    this.screens.showHangar(this.save);
     this.input.setAbilitiesVisible(false);
+    this.hangar.show();
   }
 
   private togglePause(force?: boolean): void {
@@ -185,6 +206,9 @@ class GameApp {
     if (record) this.save.bestTimeSec = Math.floor(sim.time);
     this.save.bestKills = Math.max(this.save.bestKills, sim.kills);
     this.save.bestLevel = Math.max(this.save.bestLevel, sim.player.level);
+    for (const bp of sim.foundBlueprints) {
+      if (!this.save.blueprints.includes(bp) && !this.save.owned.includes(bp)) this.save.blueprints.push(bp);
+    }
     persistSave(this.save);
 
     window.setTimeout(
@@ -196,6 +220,7 @@ class GameApp {
           kills: sim.kills,
           scrap: sim.scrapCollected,
           record,
+          blueprints: sim.foundBlueprints,
         });
       },
       won ? 900 : 1300,

@@ -3,9 +3,38 @@ import { clamp, normalize, angleDelta } from '../core/math';
 import { ENEMIES, type EnemyDef, type EnemyId } from '../content/enemies';
 import { WEAPONS, type WeaponId, type WeaponStats } from '../content/weapons';
 import type { PassiveId } from '../content/passives';
+import type { ModuleStats } from '../meta/parts';
 import { Spawner } from './spawner';
 import { SpatialHash } from './spatial';
 import { enemyHpMult, xpToNext } from './progression';
+
+/** Стартовые параметры забега — результат сборки в ангаре + прокачка пилота. */
+export interface RunStartConfig {
+  maxHp: number;
+  speed: number;
+  pickup: number;
+  weaponSlots: number;
+  weapons: Array<{ id: WeaponId; level: number }>;
+  /** Фиксированные бонусы модулей/реактора/сетов/пилота (готовые прибавки). */
+  fixed: ModuleStats;
+  /** Пул id деталей, из которого падают чертежи. */
+  blueprintPool: string[];
+  /** Начать забег с N выборами карточек (бонус пилота). */
+  startLevelBonus: number;
+}
+
+export function defaultStart(): RunStartConfig {
+  return {
+    maxHp: 100,
+    speed: 6,
+    pickup: 1.6,
+    weaponSlots: 4,
+    weapons: [{ id: 'autogun', level: 1 }],
+    fixed: {},
+    blueprintPool: [],
+    startLevelBonus: 0,
+  };
+}
 
 export interface InputSnapshot {
   moveX: number;
@@ -118,7 +147,7 @@ export interface Gem {
   x: number;
   y: number;
   value: number;
-  kind: 'xp' | 'scrap';
+  kind: 'xp' | 'scrap' | 'blueprint';
   vx: number;
   vy: number;
   magnet: boolean;
@@ -137,6 +166,7 @@ export type GameEvent =
   | { t: 'mine'; x: number; y: number }
   | { t: 'gem'; x: number; y: number; kind: 'xp' | 'scrap' }
   | { t: 'scrap'; amount: number }
+  | { t: 'blueprint'; x: number; y: number; partId: string }
   | { t: 'damaged'; amount: number; hp: number }
   | { t: 'blocked'; x: number; y: number }
   | { t: 'shield'; x: number; y: number }
@@ -169,8 +199,12 @@ export class RunSim {
   scrapCollected = 0;
   events: GameEvent[] = [];
   pendingLevelUps = 0;
+  /** Чертежи, найденные за забег. */
+  foundBlueprints: string[] = [];
+  readonly weaponSlots: number;
 
   readonly player: Player;
+  private readonly start: RunStartConfig;
   weapons: WeaponRuntime[] = [];
   passiveStacks: Partial<Record<PassiveId, number>> = {};
   enemies: Enemy[] = [];
@@ -189,17 +223,19 @@ export class RunSim {
   private bossSpawned = false;
   bossWarned = false;
 
-  constructor(seed?: number) {
+  constructor(start?: Partial<RunStartConfig>, seed?: number) {
+    this.start = { ...defaultStart(), ...start };
+    this.weaponSlots = this.start.weaponSlots;
     this.rng = new Rng(seed);
     this.spawner = new Spawner(this.rng);
     this.player = {
       x: 0,
       y: 0,
-      hp: 100,
-      maxHp: 100,
-      baseSpeed: 6,
+      hp: this.start.maxHp,
+      maxHp: this.start.maxHp,
+      baseSpeed: this.start.speed,
       radius: 0.6,
-      basePickup: 1.6,
+      basePickup: this.start.pickup,
       facingX: 0,
       facingY: 1,
       moving: false,
@@ -211,7 +247,11 @@ export class RunSim {
       level: 1,
       xp: 0,
     };
-    this.addWeapon('autogun');
+    for (const w of this.start.weapons) {
+      if (this.weapons.some((x) => x.id === w.id)) continue;
+      this.weapons.push({ id: w.id, level: clamp(w.level, 1, WEAPONS[w.id]?.maxLevel ?? 8), cd: 0.3, angle: this.rng.angle(), drones: [] });
+    }
+    this.pendingLevelUps = this.start.startLevelBonus;
   }
 
   // ---------- публичный API для main/рендера/тестов ----------
@@ -219,14 +259,15 @@ export class RunSim {
   stats(): AggregatedStats {
     const s = this.passiveStacks;
     const g = (id: PassiveId): number => s[id] ?? 0;
+    const f = this.start.fixed;
     return {
-      speed: this.player.baseSpeed * (1 + 0.07 * g('moveSpeed')),
-      damageMult: 1 + 0.12 * g('damage'),
-      attackSpeedMult: 1 + 0.1 * g('attackSpeed'),
-      areaMult: 1 + 0.12 * g('area'),
-      pickupRadius: this.player.basePickup * (1 + 0.28 * g('pickup')),
-      critChance: 0.03 + 0.06 * g('crit'),
-      xpMult: 1 + 0.12 * g('xpGain'),
+      speed: this.player.baseSpeed * (1 + 0.07 * g('moveSpeed')) * (1 + (f.moveSpeedPct ?? 0)),
+      damageMult: (1 + 0.12 * g('damage')) * (1 + (f.damagePct ?? 0)),
+      attackSpeedMult: (1 + 0.1 * g('attackSpeed')) * (1 + (f.attackSpeedPct ?? 0)),
+      areaMult: (1 + 0.12 * g('area')) * (1 + (f.areaPct ?? 0)),
+      pickupRadius: this.player.basePickup * (1 + 0.28 * g('pickup')) * (1 + (f.pickupPct ?? 0)),
+      critChance: 0.03 + 0.06 * g('crit') + (f.critChance ?? 0),
+      xpMult: (1 + 0.12 * g('xpGain')) * (1 + (f.xpPct ?? 0)),
     };
   }
 
@@ -831,6 +872,23 @@ export class RunSim {
         dead: false,
       });
     }
+    // чертежи: гарантированно с босса, 25% с голема
+    const wantBlueprint =
+      this.start.blueprintPool.length > 0 && (e.def.id === 'boss' || (e.def.id === 'tank' && this.rng.chance(0.25)));
+    if (wantBlueprint) {
+      this.gems.push({
+        uid: this.uid++,
+        x: e.x + this.rng.range(-0.3, 0.3),
+        y: e.y + this.rng.range(-0.3, 0.3),
+        value: 1,
+        kind: 'blueprint',
+        vx: this.rng.range(-1.5, 1.5),
+        vy: this.rng.range(-1.5, 1.5),
+        magnet: false,
+        magnetV: 0,
+        dead: false,
+      });
+    }
     if (e.def.id === 'boss') {
       this.boss = null;
       this.state = 'won';
@@ -871,9 +929,15 @@ export class RunSim {
         if (g.kind === 'xp') {
           this.events.push({ t: 'gem', x: g.x, y: g.y, kind: 'xp' });
           this.gainXp(g.value * st.xpMult);
+        } else if (g.kind === 'scrap') {
+          const v = Math.max(1, Math.round(g.value * (1 + (this.start.fixed.scrapPct ?? 0))));
+          this.scrapCollected += v;
+          this.events.push({ t: 'scrap', amount: v });
         } else {
-          this.scrapCollected += g.value;
-          this.events.push({ t: 'scrap', amount: g.value });
+          const pool = this.start.blueprintPool;
+          const partId = pool[this.rng.int(pool.length)];
+          this.foundBlueprints.push(partId);
+          this.events.push({ t: 'blueprint', x: g.x, y: g.y, partId });
         }
       }
     }
