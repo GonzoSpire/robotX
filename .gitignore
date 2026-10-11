@@ -1,0 +1,6 @@
+node_modules/
+dist/
+.vite/
+.zcode/
+*.local
+.DS_Store
