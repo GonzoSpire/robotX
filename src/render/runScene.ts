@@ -659,6 +659,7 @@ export class RunScene {
       const mesh = new THREE.Mesh(boxGeo(1, 1, 1), mat);
       this.scene.add(mesh);
       fx = { mesh, mat, t: 0, dur: 1 };
+      this.beams.push(fx);
     }
     fx.t = 0;
     fx.dur = 0.14;
@@ -687,6 +688,7 @@ export class RunScene {
       const mesh = new THREE.Mesh(forwardConeGeo(1, 1), mat);
       this.scene.add(mesh);
       fx = { mesh, mat, t: 0, dur: 1 };
+      this.flames.push(fx);
     }
     fx.t = 0;
     fx.dur = 0.22;
