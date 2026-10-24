@@ -142,7 +142,7 @@ describe('симуляция забега', () => {
     expect(sim.kills).toBe(1);
     expect(sim.gems.some((g) => g.kind === 'xp')).toBe(true);
     for (let i = 0; i < 120; i++) sim.tick(1 / 60, input);
-    expect(sim.player.xp + 0).toBeGreaterThanOrEqual(0);
+    expect(sim.xp + 0).toBeGreaterThanOrEqual(0);
     expect(sim.gems.filter((g) => g.kind === 'xp').length).toBeLessThanOrEqual(1);
   });
 

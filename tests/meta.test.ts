@@ -119,7 +119,7 @@ describe('старт забега из сборки', () => {
     expect(sim.player.maxHp).toBe(150);
     expect(sim.player.hp).toBe(150);
     expect(sim.player.baseSpeed).toBe(7);
-    expect(sim.weaponSlots).toBe(2);
+    expect(sim.player.weaponSlots).toBe(2);
     expect(sim.weapons).toEqual([expect.objectContaining({ id: 'laser', level: 3 })]);
     expect(sim.stats().damageMult).toBeCloseTo(1.3, 5);
   });
@@ -139,7 +139,7 @@ describe('старт забега из сборки', () => {
     expect(sim.gems.filter((g) => g.kind === 'blueprint').length).toBe(1);
     expect(sim.state).toBe('won'); // после победы тик заморожен — проверяем подбор вручную
     sim.gems.length = 0;
-    sim.gems.push({ uid: 9999, x: 0.3, y: 0, value: 1, kind: 'blueprint', vx: 0, vy: 0, magnet: false, magnetV: 0, dead: false });
+    sim.gems.push({ uid: 9999, x: 0.3, y: 0, value: 1, kind: 'blueprint', vx: 0, vy: 0, magnet: false, magnetTo: -1, magnetV: 0, dead: false });
     sim.player.x = 0.3;
     sim.player.y = 0;
     sim.state = 'running';

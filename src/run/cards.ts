@@ -1,35 +1,35 @@
 import { Rng } from '../core/rng';
 import { PASSIVES, PASSIVE_IDS, type PassiveId } from '../content/passives';
 import { WEAPONS, WEAPON_IDS, type WeaponId } from '../content/weapons';
-import type { RunSim } from './sim';
+import type { Player, RunSim } from './sim';
 
 export type Card =
   | { kind: 'weapon-new'; weapon: WeaponId }
   | { kind: 'weapon-up'; weapon: WeaponId }
   | { kind: 'passive'; passive: PassiveId };
 
-/** Лимит оружий в забеге по умолчанию; реальный лимит задаёт шасси (sim.weaponSlots). */
+/** Лимит оружий в забеге по умолчанию; реальный лимит задаёт шасси игрока. */
 export const RUN_WEAPON_SLOTS = 4;
 
-export function buildCardPool(sim: RunSim): Card[] {
+export function buildCardPool(sim: RunSim, p: Player = sim.player): Card[] {
   const pool: Card[] = [];
-  const owned = new Map(sim.weapons.map((w) => [w.id, w.level]));
+  const owned = new Map(p.weapons.map((w) => [w.id, w.level]));
 
-  if (sim.weapons.length < sim.weaponSlots) {
+  if (p.weapons.length < p.weaponSlots) {
     for (const id of WEAPON_IDS) if (!owned.has(id)) pool.push({ kind: 'weapon-new', weapon: id });
   }
   for (const [id, level] of owned) {
     if (level < WEAPONS[id].maxLevel) pool.push({ kind: 'weapon-up', weapon: id });
   }
   for (const id of PASSIVE_IDS) {
-    if ((sim.passiveStacks[id] ?? 0) < PASSIVES[id].maxStacks) pool.push({ kind: 'passive', passive: id });
+    if ((p.passiveStacks[id] ?? 0) < PASSIVES[id].maxStacks) pool.push({ kind: 'passive', passive: id });
   }
   return pool;
 }
 
 /** До трёх разных карточек. */
-export function rollCards(rng: Rng, sim: RunSim): Card[] {
-  const pool = buildCardPool(sim);
+export function rollCards(rng: Rng, sim: RunSim, p: Player = sim.player): Card[] {
+  const pool = buildCardPool(sim, p);
   const picked: Card[] = [];
   while (picked.length < 3 && pool.length > 0) {
     const i = rng.int(pool.length);
@@ -39,32 +39,32 @@ export function rollCards(rng: Rng, sim: RunSim): Card[] {
   return picked;
 }
 
-export function applyCard(sim: RunSim, card: Card): void {
+export function applyCard(sim: RunSim, card: Card, p: Player = sim.player): void {
   switch (card.kind) {
     case 'weapon-new':
-      sim.addWeapon(card.weapon);
+      sim.addWeapon(card.weapon, p);
       break;
     case 'weapon-up': {
-      const w = sim.weapons.find((x) => x.id === card.weapon);
+      const w = p.weapons.find((x) => x.id === card.weapon);
       if (w) w.level = Math.min(WEAPONS[card.weapon].maxLevel, w.level + 1);
       break;
     }
     case 'passive':
-      sim.addPassiveStack(card.passive);
+      sim.addPassiveStack(card.passive, p);
       break;
   }
 }
 
-export function cardTitle(card: Card, sim: RunSim): string {
+export function cardTitle(card: Card, sim: RunSim, p: Player = sim.player): string {
   switch (card.kind) {
     case 'weapon-new':
       return `НОВОЕ · ${WEAPONS[card.weapon].name}`;
     case 'weapon-up': {
-      const lvl = sim.weapons.find((x) => x.id === card.weapon)?.level ?? 1;
+      const lvl = p.weapons.find((x) => x.id === card.weapon)?.level ?? 1;
       return `${WEAPONS[card.weapon].name} · ур. ${lvl} → ${lvl + 1}`;
     }
     case 'passive': {
-      const stacks = (sim.passiveStacks[card.passive] ?? 0) + 1;
+      const stacks = (p.passiveStacks[card.passive] ?? 0) + 1;
       return `${PASSIVES[card.passive].name} · ${stacks}/5`;
     }
   }

@@ -23,6 +23,8 @@ export interface ScreensCallbacks {
   onToHangar: () => void;
   onResume: () => void;
   onRestart: () => void;
+  /** Сетка: вернуться в лобби после забега (хост). */
+  onToLobby?: () => void;
 }
 
 function fmtTime(sec: number): string {
@@ -127,11 +129,19 @@ export class Screens {
 
   // ---------- результаты ----------
 
-  showResults(d: ResultData): void {
+  showResults(d: ResultData, opts?: { net?: 'host' | 'client' }) {
     const bpNames = d.blueprints.map((id) => PART_BY_ID[id]?.name ?? id);
+    const net = opts?.net;
+    const buttons = net
+      ? net === 'host'
+        ? `<button class="btn btn-primary" id="lobby-btn">В ЛОББИ</button>`
+        : `<div class="footnote">ждём хоста — он вернёт всех в лобби</div>
+           <div class="btn-row" style="margin-top:8px"><button class="btn" id="hangar-btn2">В АНГАР</button></div>`
+      : `<button class="btn btn-primary" id="retry-btn">ЕЩЁ ЗАБЕГ</button>
+         <button class="btn" id="hangar-btn2">В АНГАР</button>`;
     this.results.innerHTML = `
       <div class="panel" style="max-width:420px">
-        <div class="result-title ${d.won ? 'win' : 'lose'}">${d.won ? 'ПОБЕДА' : 'РОБОТ УНИЧТОЖЕН'}</div>
+        <div class="result-title ${d.won ? 'win' : 'lose'}">${d.won ? 'ПОБЕДА' : 'ОТРЯД ПАЛ'}</div>
         ${d.record && !d.won ? '<div class="footnote" style="color:var(--gold)">★ НОВЫЙ РЕКОРД ВРЕМЕНИ</div>' : ''}
         <div class="result-rows">
           <div class="result-row"><span>Время</span><b>${fmtTime(d.timeSec)}</b></div>
@@ -140,14 +150,45 @@ export class Screens {
           <div class="result-row"><span>Скрап</span><b class="gain">+${d.scrap} ⚙</b></div>
           ${bpNames.length ? `<div class="result-row"><span>Чертежи</span><b class="gain">+${bpNames.length}</b></div><div class="footnote">${bpNames.join(' · ')}</div>` : ''}
         </div>
-        <div class="btn-row">
-          <button class="btn btn-primary" id="retry-btn">ЕЩЁ ЗАБЕГ</button>
-          <button class="btn" id="hangar-btn2">В АНГАР</button>
-        </div>
+        <div class="btn-row">${buttons}</div>
       </div>
     `;
     this.results.classList.add('show');
-    this.results.querySelector('#retry-btn')!.addEventListener('click', this.cb.onRetry);
-    this.results.querySelector('#hangar-btn2')!.addEventListener('click', this.cb.onToHangar);
+    this.results.querySelector('#retry-btn')?.addEventListener('click', this.cb.onRetry);
+    this.results.querySelector('#hangar-btn2')?.addEventListener('click', this.cb.onToHangar);
+    this.results.querySelector('#lobby-btn')?.addEventListener('click', () => this.cb.onToLobby?.());
+  }
+
+  // ---------- сетевые экраны ----------
+
+  /** Меню Esc в сетевом забеге: симуляция не останавливается. */
+  showPauseNet(onQuit: () => void): void {
+    this.pause.innerHTML = `
+      <div class="panel" style="max-width:320px">
+        <div class="game-title" style="font-size:26px">СЕТЕВОЙ ЗАБЕГ</div>
+        <div class="footnote" style="margin-top:6px">кооп не останавливается</div>
+        <div class="btn-row" style="flex-direction:column;margin-top:14px">
+          <button class="btn btn-primary" id="resume-btn">ПРОДОЛЖИТЬ</button>
+          <button class="btn" id="quit-btn">ПОКИНУТЬ ЗАБЕГ</button>
+        </div>
+      </div>
+    `;
+    this.pause.classList.add('show');
+    this.pause.querySelector('#resume-btn')!.addEventListener('click', this.cb.onResume);
+    this.pause.querySelector('#quit-btn')!.addEventListener('click', onQuit);
+  }
+
+  showNetError(msg: string, onOk: () => void): void {
+    this.pause.innerHTML = `
+      <div class="panel" style="max-width:360px">
+        <div class="game-title" style="font-size:22px;color:var(--red)">СВЯЗЬ ПОТЕРЯНА</div>
+        <div class="footnote" style="margin-top:8px">${msg}</div>
+        <div class="btn-row" style="margin-top:14px">
+          <button class="btn btn-primary" id="net-ok">В АНГАР</button>
+        </div>
+      </div>
+    `;
+    this.pause.classList.add('show');
+    this.pause.querySelector('#net-ok')!.addEventListener('click', onOk);
   }
 }

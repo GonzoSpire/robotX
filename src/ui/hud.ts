@@ -1,4 +1,4 @@
-import type { RunSim } from '../run/sim';
+import { PLAYER_ACCENTS, type RunView } from '../run/view';
 import { xpToNext } from '../run/progression';
 
 function fmtTime(sec: number): string {
@@ -7,7 +7,13 @@ function fmtTime(sec: number): string {
   return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
 }
 
-/** Боевой HUD: полосы, таймер, счётчики, всплывающий текст, полоса босса. */
+interface MateBar {
+  pid: number;
+  root: HTMLElement;
+  fill: HTMLElement;
+}
+
+/** Боевой HUD: полосы, таймер, счётчики, союзники, полоса босса. */
 export class Hud {
   private readonly root: HTMLElement;
   private readonly hpFill: HTMLElement;
@@ -21,6 +27,8 @@ export class Hud {
   private readonly bossBar: HTMLElement;
   private readonly bossFill: HTMLElement;
   private readonly floaters: HTMLElement;
+  private readonly matesWrap: HTMLElement;
+  private readonly mates: MateBar[] = [];
 
   constructor(uiRoot: HTMLElement, onPause: () => void) {
     this.root = document.createElement('div');
@@ -35,6 +43,7 @@ export class Hud {
           <div class="bar-fill" id="xp-fill" style="width:0%"></div>
           <div class="bar-text" id="xp-text"></div>
         </div>
+        <div id="mates"></div>
       </div>
       <div class="hud-mid">
         <div id="timer">00:00</div>
@@ -66,6 +75,7 @@ export class Hud {
     this.scrap = this.must('scrap-hud');
     this.bossBar = this.must('boss-bar');
     this.bossFill = this.must('boss-fill');
+    this.matesWrap = this.must('mates');
 
     this.must('pause-btn').addEventListener('click', onPause);
   }
@@ -76,15 +86,15 @@ export class Hud {
     return el;
   }
 
-  update(sim: RunSim): void {
+  update(sim: RunView): void {
     const p = sim.player;
     this.hpFill.style.width = `${Math.max(0, (p.hp / p.maxHp) * 100)}%`;
     this.hpText.textContent = `${Math.max(0, Math.ceil(p.hp))}/${p.maxHp}`;
-    this.xpFill.style.width = `${Math.min(100, (p.xp / xpToNext(p.level)) * 100)}%`;
-    this.xpText.textContent = `LVL ${p.level}`;
+    this.xpFill.style.width = `${Math.min(100, (sim.xp / xpToNext(sim.level)) * 100)}%`;
+    this.xpText.textContent = `LVL ${sim.level}`;
     this.timer.textContent = fmtTime(sim.time);
     this.kills.textContent = `☠ ${sim.kills}`;
-    this.scrap.textContent = `⚙ ${sim.scrapCollected}`;
+    this.scrap.textContent = `⚙ ${p.scrapCollected}`;
 
     if (sim.boss) {
       this.bossBar.style.display = 'block';
@@ -93,6 +103,36 @@ export class Hud {
     } else {
       this.bossBar.style.display = 'none';
       this.bossCountdown.textContent = sim.time > 480 && sim.time < 600 ? `ЯДРО-ТИТАН ЧЕРЕЗ ${fmtTime(600 - sim.time)}` : '';
+    }
+
+    this.updateMates(sim);
+  }
+
+  /** Мини-полоски союзников (кроме своего робота). */
+  private updateMates(sim: RunView): void {
+    const others = sim.players.filter((x) => x.id !== sim.player.id);
+    const sameSet =
+      this.mates.length === others.length && this.mates.every((m, i) => m.pid === others[i].id);
+    if (!sameSet) {
+      this.matesWrap.innerHTML = '';
+      this.mates.length = 0;
+      for (const o of others) {
+        const root = document.createElement('div');
+        root.className = 'mate';
+        const color = `#${(PLAYER_ACCENTS[o.colorIdx] ?? PLAYER_ACCENTS[0]).toString(16).padStart(6, '0')}`;
+        root.innerHTML = `
+          <span class="mate-name" style="color:${color}">${escapeHtml(o.name)}</span>
+          <div class="mate-bar"><div class="mate-fill" style="background:${color}"></div></div>
+        `;
+        this.matesWrap.appendChild(root);
+        this.mates.push({ pid: o.id, root, fill: root.querySelector('.mate-fill') as HTMLElement });
+      }
+    }
+    for (let i = 0; i < this.mates.length; i++) {
+      const m = this.mates[i];
+      const o = others[i];
+      m.root.classList.toggle('dead', o.dead);
+      (m.fill as HTMLElement).style.width = `${Math.max(0, (o.hp / o.maxHp) * 100)}%`;
     }
   }
 
@@ -117,4 +157,8 @@ export class Hud {
     this.root.style.display = 'none';
     this.floaters.innerHTML = '';
   }
+}
+
+function escapeHtml(s: string): string {
+  return s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
 }

@@ -1,7 +1,8 @@
 import * as THREE from 'three';
 import { clamp, damp, lerp } from '../core/math';
-import type { GameEvent, RunSim } from '../run/sim';
+import type { GameEvent } from '../run/sim';
 import { DASH_CD, SHIELD_CD } from '../run/sim';
+import { PLAYER_ACCENTS, type RunView } from '../run/view';
 import {
   boxGeo,
   buildEnemyBot,
@@ -18,8 +19,22 @@ import type { RenderCore } from './core';
 const CAM_H = 13.5;
 const CAM_D = 8.5;
 
+export interface RosterView {
+  pid: number;
+  name: string;
+  colorIdx: number;
+}
+
 interface EnemyItem {
   view: BotView;
+}
+interface PlayerItem {
+  pid: number;
+  view: BotView;
+  shieldMesh: THREE.Mesh;
+  shieldMat: THREE.MeshBasicMaterial;
+  deadT: number;
+  nameplate: HTMLElement | null;
 }
 interface FxSpark {
   mesh: THREE.Mesh;
@@ -54,16 +69,15 @@ export class RunScene {
   readonly scene = new THREE.Scene();
   readonly camera: THREE.PerspectiveCamera;
 
-  private player: BotView;
-  private shieldMesh: THREE.Mesh;
-  private shieldMat: THREE.MeshBasicMaterial;
+  private playerItems = new Map<number, PlayerItem>();
+  private readonly localPid: number;
   private enemyViews = new Map<number, EnemyItem>();
   private projViews = new Map<number, THREE.Mesh>();
   private boltViews = new Map<number, THREE.Mesh>();
   private gemViews = new Map<number, THREE.Mesh>();
   private mineViews = new Map<number, THREE.Group>();
   private waveViews = new Map<number, THREE.Mesh>();
-  private droneViews: THREE.Mesh[] = [];
+  private droneViews: Array<{ mesh: THREE.Mesh; mat: THREE.MeshBasicMaterial }> = [];
 
   private sparks: FxSpark[] = [];
   private booms: FxBoom[] = [];
@@ -71,18 +85,26 @@ export class RunScene {
   private flames: FxFlame[] = [];
 
   private shake = 0;
-  private deadT = 0;
   private camX = 0;
   private camY = 0;
   private readonly v = new THREE.Vector3();
+  private readonly nameplates: HTMLElement;
 
   constructor(
     private readonly core: RenderCore,
+    roster: RosterView[],
+    localPid: number,
+    uiRoot: HTMLElement,
     private readonly onFloater: (x: number, y: number, text: string, cls: string) => void,
   ) {
+    this.localPid = localPid;
     this.scene.background = new THREE.Color(0x0b0e13);
     this.scene.fog = new THREE.Fog(0x0b0e13, 22, 58);
     this.camera = new THREE.PerspectiveCamera(50, 1, 0.1, 120);
+
+    this.nameplates = document.createElement('div');
+    this.nameplates.className = 'nameplates';
+    uiRoot.appendChild(this.nameplates);
 
     const hemi = new THREE.HemisphereLight(0xcfe3ff, 0x39424e, 1.25);
     this.scene.add(hemi);
@@ -92,24 +114,37 @@ export class RunScene {
 
     this.buildArena();
 
-    this.player = buildPlayerBot();
-    this.scene.add(this.player.group);
-    const pl = new THREE.PointLight(0x3ef0d0, 14, 11, 2);
-    pl.position.set(0, 2.2, 0);
-    this.player.group.add(pl);
+    for (const r of roster) {
+      const accent = PLAYER_ACCENTS[r.colorIdx] ?? PLAYER_ACCENTS[0];
+      const view = buildPlayerBot(accent);
+      this.scene.add(view.group);
+      if (r.pid === localPid) {
+        const pl = new THREE.PointLight(accent, 14, 11, 2);
+        pl.position.set(0, 2.2, 0);
+        view.group.add(pl);
+      }
+      const shieldMat = new THREE.MeshBasicMaterial({
+        color: accent,
+        transparent: true,
+        opacity: 0.22,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+      });
+      const shieldMesh = new THREE.Mesh(sphereGeo(1, 18), shieldMat);
+      shieldMesh.position.y = 0.8;
+      shieldMesh.scale.setScalar(1.15);
+      shieldMesh.visible = false;
+      view.group.add(shieldMesh);
 
-    this.shieldMat = new THREE.MeshBasicMaterial({
-      color: 0x3ef0d0,
-      transparent: true,
-      opacity: 0.22,
-      blending: THREE.AdditiveBlending,
-      depthWrite: false,
-    });
-    this.shieldMesh = new THREE.Mesh(sphereGeo(1, 18), this.shieldMat);
-    this.shieldMesh.position.y = 0.8;
-    this.shieldMesh.scale.setScalar(1.15);
-    this.shieldMesh.visible = false;
-    this.player.group.add(this.shieldMesh);
+      let nameplate: HTMLElement | null = null;
+      if (r.pid !== localPid) {
+        nameplate = document.createElement('div');
+        nameplate.className = 'nameplate';
+        nameplate.textContent = r.name;
+        this.nameplates.appendChild(nameplate);
+      }
+      this.playerItems.set(r.pid, { pid: r.pid, view, shieldMesh, shieldMat, deadT: 0, nameplate });
+    }
 
     core.onResize((w, h) => {
       this.camera.aspect = w / h;
@@ -181,19 +216,37 @@ export class RunScene {
 
   // ---------- синхронизация с симуляцией ----------
 
-  sync(sim: RunSim, dt: number, wall: number, events: GameEvent[]): void {
+  sync(sim: RunView, dt: number, wall: number, events: GameEvent[]): void {
     this.updateCamera(sim, dt);
-    this.updatePlayer(sim, dt, wall);
+    this.updatePlayers(sim, dt, wall);
     this.updateEnemies(sim, wall);
     this.updateProjectiles(sim);
     this.updateSimpleEntities(sim, wall);
     this.updateDrones(sim, wall);
+    this.updateNameplates();
     this.updateFx(dt);
     for (const ev of events) this.handleEvent(ev, sim);
   }
 
-  private updateCamera(sim: RunSim, dt: number): void {
-    const p = sim.player;
+  /** Свой робот; после смерти — ближайший живой союзник (спектатор). */
+  private cameraTarget(sim: RunView) {
+    const own = sim.players.find((p) => p.id === this.localPid);
+    if (own && !own.dead) return own;
+    let best = own ?? sim.players[0];
+    let bestD2 = Infinity;
+    for (const p of sim.players) {
+      if (p.dead) continue;
+      const d2 = (p.x - (best?.x ?? 0)) ** 2 + (p.y - (best?.y ?? 0)) ** 2;
+      if (d2 < bestD2) {
+        bestD2 = d2;
+        best = p;
+      }
+    }
+    return best;
+  }
+
+  private updateCamera(sim: RunView, dt: number): void {
+    const p = this.cameraTarget(sim);
     this.camX = damp(this.camX, p.x, 6, dt);
     this.camY = damp(this.camY, p.y, 6, dt);
     this.shake = Math.max(0, this.shake - this.shake * 5 * dt - 0.01 * dt);
@@ -203,33 +256,47 @@ export class RunScene {
     this.camera.lookAt(this.camX, 0.6, this.camY);
   }
 
-  private updatePlayer(sim: RunSim, dt: number, wall: number): void {
-    const p = sim.player;
-    const g = this.player.group;
-    g.position.set(p.x, 0, p.y);
-    g.rotation.y = Math.atan2(p.facingX, p.facingY);
+  private updatePlayers(sim: RunView, dt: number, wall: number): void {
+    for (const p of sim.players) {
+      const item = this.playerItems.get(p.id);
+      if (!item) continue;
+      const g = item.view.group;
+      g.position.set(p.x, 0, p.y);
+      g.rotation.y = Math.atan2(p.facingX, p.facingY);
 
-    if (sim.state === 'dead') {
-      this.deadT += dt;
-      g.rotation.z = Math.min(this.deadT * 4, Math.PI / 2);
-      this.player.body.position.y = -Math.min(this.deadT * 0.8, 0.35);
-    } else {
-      const bobK = p.moving ? 1 : 0.3;
-      this.player.body.position.y = Math.abs(Math.sin(wall * 11)) * 0.05 * bobK;
-      this.player.body.rotation.x = p.moving ? 0.06 : 0;
-      const stretch = p.dashT > 0 ? 1 : 0;
-      this.player.body.scale.z = lerp(this.player.body.scale.z, stretch ? 1.3 : 1, 1 - Math.exp(-14 * dt));
-    }
+      if (p.dead) {
+        item.deadT += dt;
+        g.rotation.z = Math.min(item.deadT * 4, Math.PI / 2);
+        item.view.body.position.y = -Math.min(item.deadT * 0.8, 0.35);
+      } else {
+        item.deadT = 0;
+        const bobK = p.moving ? 1 : 0.3;
+        item.view.body.position.y = Math.abs(Math.sin(wall * 11)) * 0.05 * bobK;
+        item.view.body.rotation.x = p.moving ? 0.06 : 0;
+        const stretch = p.dashT > 0 ? 1 : 0;
+        item.view.body.scale.z = lerp(item.view.body.scale.z, stretch ? 1.3 : 1, 1 - Math.exp(-14 * dt));
+      }
 
-    const shieldOn = p.shieldT > 0;
-    this.shieldMesh.visible = shieldOn;
-    if (shieldOn) {
-      this.shieldMat.opacity = 0.16 + Math.sin(wall * 9) * 0.06 + (p.shieldT < 1 ? Math.sin(wall * 25) * 0.1 : 0);
+      const shieldOn = p.shieldT > 0;
+      item.shieldMesh.visible = shieldOn;
+      if (shieldOn) {
+        item.shieldMat.opacity = 0.16 + Math.sin(wall * 9) * 0.06 + (p.shieldT < 1 ? Math.sin(wall * 25) * 0.1 : 0);
+      }
+      setFlash(item.view, p.iframe > 0.35 ? 0.7 : 0);
+      if (item.nameplate) item.nameplate.style.opacity = p.dead ? '0' : '1';
     }
-    setFlash(this.player, p.iframe > 0.35 ? 0.7 : 0);
   }
 
-  private updateEnemies(sim: RunSim, wall: number): void {
+  private updateNameplates(): void {
+    for (const item of this.playerItems.values()) {
+      if (!item.nameplate) continue;
+      const g = item.view.group;
+      const s = this.worldToScreen(g.position.x, g.position.z, 2.3);
+      item.nameplate.style.transform = `translate(-50%,-100%) translate(${s.x}px,${s.y}px)`;
+    }
+  }
+
+  private updateEnemies(sim: RunView, wall: number): void {
     const seen = new Set<number>();
     for (const e of sim.enemies) {
       seen.add(e.uid);
@@ -241,7 +308,20 @@ export class RunScene {
       }
       const v = item.view;
       v.group.position.set(e.x, 0, e.y);
-      v.group.rotation.y = Math.atan2(sim.player.x - e.x, sim.player.y - e.y);
+      // моб смотрит на ближайшего живого игрока
+      let tx = sim.players[0]?.x ?? 0;
+      let ty = sim.players[0]?.y ?? 0;
+      let bestD2 = Infinity;
+      for (const p of sim.players) {
+        if (p.dead) continue;
+        const d2 = (p.x - e.x) ** 2 + (p.y - e.y) ** 2;
+        if (d2 < bestD2) {
+          bestD2 = d2;
+          tx = p.x;
+          ty = p.y;
+        }
+      }
+      v.group.rotation.y = Math.atan2(tx - e.x, ty - e.y);
       const spawnK = e.spawnT > 0 ? 1 - e.spawnT / 0.35 : 1;
       const pop = 0.3 + 0.7 * spawnK;
       v.group.scale.setScalar(pop);
@@ -261,7 +341,7 @@ export class RunScene {
     }
   }
 
-  private updateProjectiles(sim: RunSim): void {
+  private updateProjectiles(sim: RunView): void {
     const seenP = new Set<number>();
     for (const pr of sim.projectiles) {
       seenP.add(pr.uid);
@@ -303,7 +383,7 @@ export class RunScene {
     this.releaseUnseen(this.boltViews, seenB);
   }
 
-  private updateSimpleEntities(sim: RunSim, wall: number): void {
+  private updateSimpleEntities(sim: RunView, wall: number): void {
     const seenG = new Set<number>();
     for (const gem of sim.gems) {
       seenG.add(gem.uid);
@@ -384,28 +464,34 @@ export class RunScene {
     this.releaseUnseen(this.waveViews, seenW);
   }
 
-  private updateDrones(sim: RunSim, wall: number): void {
+  private updateDrones(sim: RunView, wall: number): void {
     let total = 0;
-    for (const w of sim.weapons) total += w.drones.length;
+    for (const p of sim.players) {
+      if (p.dead) continue;
+      for (const w of p.weapons) total += w.drones.length;
+    }
     while (this.droneViews.length < total) {
-      const mesh = new THREE.Mesh(
-        octaGeo(0.26),
-        new THREE.MeshBasicMaterial({ color: 0x7ef2ff }),
-      );
+      const mat = new THREE.MeshBasicMaterial({ color: 0x7ef2ff });
+      const mesh = new THREE.Mesh(octaGeo(0.26), mat);
       this.scene.add(mesh);
-      this.droneViews.push(mesh);
+      this.droneViews.push({ mesh, mat });
     }
     let i = 0;
-    for (const w of sim.weapons) {
-      for (const d of w.drones) {
-        const mesh = this.droneViews[i++];
-        mesh.visible = true;
-        mesh.position.set(d.x, 1.0 + Math.sin(wall * 6 + i) * 0.1, d.y);
-        mesh.rotation.y = wall * 5;
-        mesh.rotation.x = Math.PI / 2;
+    for (const p of sim.players) {
+      if (p.dead) continue;
+      const color = PLAYER_ACCENTS[p.colorIdx] ?? PLAYER_ACCENTS[0];
+      for (const w of p.weapons) {
+        for (const d of w.drones) {
+          const dv = this.droneViews[i++];
+          dv.mesh.visible = true;
+          dv.mat.color.setHex(color);
+          dv.mesh.position.set(d.x, 1.0 + Math.sin(wall * 6 + i) * 0.1, d.y);
+          dv.mesh.rotation.y = wall * 5;
+          dv.mesh.rotation.x = Math.PI / 2;
+        }
       }
     }
-    for (; i < this.droneViews.length; i++) this.droneViews[i].visible = false;
+    for (; i < this.droneViews.length; i++) this.droneViews[i].mesh.visible = false;
   }
 
   private releaseUnseen(map: Map<number, THREE.Object3D>, seen: Set<number>): void {
@@ -419,11 +505,11 @@ export class RunScene {
 
   // ---------- события → эффекты ----------
 
-  private handleEvent(ev: GameEvent, sim: RunSim): void {
-    const p = sim.player;
+  private handleEvent(ev: GameEvent, sim: RunView): void {
+    const own = sim.players.find((p) => p.id === this.localPid);
     switch (ev.t) {
       case 'shoot':
-        this.spawnSpark(p.x + ev.dx * 1.1, p.y + ev.dy * 1.1, 0.35, 0xffd9a0, 0.08);
+        this.spawnSpark(ev.x + ev.dx * 1.1, ev.y + ev.dy * 1.1, 0.35, 0xffd9a0, 0.08);
         break;
       case 'hit': {
         this.spawnSpark(ev.x, ev.y, ev.crit ? 0.55 : 0.35, ev.crit ? 0xffe14d : 0xffffff, 0.16);
@@ -434,14 +520,16 @@ export class RunScene {
         this.spawnSpark(ev.x, ev.y, 0.8, 0xff5a5a, 0.3);
         break;
       case 'damaged':
-        this.shake = Math.min(0.6, this.shake + 0.3);
-        this.onFloater(p.x, p.y, `−${ev.amount}`, 'hurt');
+        if (ev.pid === this.localPid) {
+          this.shake = Math.min(0.6, this.shake + 0.3);
+          this.onFloater(ev.x, ev.y, `−${ev.amount}`, 'hurt');
+        }
         break;
       case 'blocked':
-        this.spawnSpark(p.x, p.y, 0.7, 0x3ef0d0, 0.2);
+        if (ev.pid === this.localPid) this.spawnSpark(ev.x, ev.y, 0.7, 0x3ef0d0, 0.2);
         break;
       case 'shield':
-        this.spawnRing(p.x, p.y, 1.6, 0x3ef0d0);
+        this.spawnRing(ev.x, ev.y, 1.6, 0x3ef0d0);
         break;
       case 'beam':
         this.spawnBeam(ev.x1, ev.y1, ev.x2, ev.y2, ev.w);
@@ -456,19 +544,21 @@ export class RunScene {
       case 'nova':
         break;
       case 'levelup':
-        this.onFloater(p.x, p.y, `УРОВЕНЬ ${ev.level}`, 'levelup');
-        this.spawnRing(p.x, p.y, 2.4, 0xffe14d);
+        if (ev.pid === this.localPid) {
+          this.onFloater(ev.x, ev.y, `УРОВЕНЬ ${ev.level}`, 'levelup');
+        }
+        this.spawnRing(ev.x, ev.y, 2.4, 0xffe14d);
         break;
       case 'scrap':
-        this.onFloater(p.x, p.y, `+${ev.amount} ⚙`, 'scrap');
+        if (ev.pid === this.localPid) this.onFloater(ev.x, ev.y, `+${ev.amount} ⚙`, 'scrap');
         break;
       case 'blueprint':
-        this.onFloater(p.x, p.y, '★ ЧЕРТЁЖ ★', 'levelup');
-        this.spawnRing(p.x, p.y, 2, 0x9ad8ff);
+        if (ev.pid === this.localPid) this.onFloater(ev.x, ev.y, '★ ЧЕРТЁЖ ★', 'levelup');
+        this.spawnRing(ev.x, ev.y, 2, 0x9ad8ff);
         this.shake = 0.2;
         break;
       case 'bossWarn':
-        this.onFloater(p.x, p.y, '!! ЯДРО-ТИТАН !!', 'boss');
+        this.onFloater(own?.x ?? 0, own?.y ?? 0, '!! ЯДРО-ТИТАН !!', 'boss');
         this.shake = 0.4;
         break;
       case 'bossSpawn':
@@ -476,11 +566,11 @@ export class RunScene {
         this.shake = 0.5;
         break;
       case 'died':
-        this.shake = 0.7;
-        this.spawnBoom(p.x, p.y, 1.6);
+        this.shake = Math.max(this.shake, 0.5);
+        this.spawnBoom(ev.x, ev.y, 1.6);
         break;
       case 'won':
-        this.spawnRing(p.x, p.y, 4, 0xffe14d);
+        this.spawnRing(own?.x ?? 0, own?.y ?? 0, 4, 0xffe14d);
         this.shake = 0.4;
         break;
       default:
@@ -569,7 +659,6 @@ export class RunScene {
       const mesh = new THREE.Mesh(boxGeo(1, 1, 1), mat);
       this.scene.add(mesh);
       fx = { mesh, mat, t: 0, dur: 1 };
-      this.beams.push(fx);
     }
     fx.t = 0;
     fx.dur = 0.14;
@@ -598,7 +687,6 @@ export class RunScene {
       const mesh = new THREE.Mesh(forwardConeGeo(1, 1), mat);
       this.scene.add(mesh);
       fx = { mesh, mat, t: 0, dur: 1 };
-      this.flames.push(fx);
     }
     fx.t = 0;
     fx.dur = 0.22;
@@ -658,18 +746,19 @@ export class RunScene {
 
   // ---------- утилиты ----------
 
-  worldToScreen(x: number, y: number): { x: number; y: number } {
-    this.v.set(x, 0.8, y).project(this.camera);
+  worldToScreen(x: number, y: number, h = 0.8): { x: number; y: number } {
+    this.v.set(x, h, y).project(this.camera);
     const c = this.core.renderer.domElement;
     return { x: (this.v.x * 0.5 + 0.5) * c.clientWidth, y: (-this.v.y * 0.5 + 0.5) * c.clientHeight };
   }
 
-  /** Затухание после рывка/щита для кнопок HUD. */
-  abilityFracs(sim: RunSim): { dash: number; shield: number; shieldOn: boolean } {
+  /** Затухание после рывка/щита для кнопок HUD (локальный игрок). */
+  abilityFracs(sim: RunView): { dash: number; shield: number; shieldOn: boolean } {
+    const p = sim.players.find((x) => x.id === this.localPid) ?? sim.players[0];
     return {
-      dash: sim.player.dashCd / DASH_CD,
-      shield: sim.player.shieldCd / SHIELD_CD,
-      shieldOn: sim.player.shieldT > 0,
+      dash: p.dashCd / DASH_CD,
+      shield: p.shieldCd / SHIELD_CD,
+      shieldOn: p.shieldT > 0,
     };
   }
 
@@ -677,7 +766,8 @@ export class RunScene {
     this.scene.traverse((obj) => {
       if (obj instanceof THREE.Mesh) disposeMaterials(obj);
     });
-    for (const m of this.droneViews) m.visible = false;
+    for (const d of this.droneViews) d.mesh.visible = false;
+    this.nameplates.remove();
   }
 }
 
