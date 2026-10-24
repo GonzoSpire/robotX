@@ -8,7 +8,7 @@ import { Spawner } from './spawner';
 import { SpatialHash } from './spatial';
 import { enemyHpMult, xpToNext } from './progression';
 
-/** Стартовые параметры забега — результат сборки в ангаре + прокачка пилота. */
+/** Стартовые параметры игрока — результат сборки в ангаре + прокачка пилота. */
 export interface RunStartConfig {
   maxHp: number;
   speed: number;
@@ -43,7 +43,18 @@ export interface InputSnapshot {
   shield: boolean;
 }
 
+/** Один участник забега (соло или сетевой кооп). */
+export interface PlayerEntry {
+  id: number;
+  name: string;
+  colorIdx: number;
+  start?: Partial<RunStartConfig>;
+}
+
 export interface Player {
+  id: number;
+  name: string;
+  colorIdx: number;
   x: number;
   y: number;
   hp: number;
@@ -59,8 +70,16 @@ export interface Player {
   dashT: number;
   shieldCd: number;
   shieldT: number;
-  level: number;
-  xp: number;
+  dead: boolean;
+  /** Сборка и прогресс этого игрока. */
+  weapons: WeaponRuntime[];
+  passiveStacks: Partial<Record<PassiveId, number>>;
+  fixed: ModuleStats;
+  weaponSlots: number;
+  blueprintPool: string[];
+  scrapCollected: number;
+  foundBlueprints: string[];
+  pendingLevelUps: number;
 }
 
 export interface WeaponRuntime {
@@ -95,6 +114,7 @@ export interface Enemy {
 export interface Projectile {
   uid: number;
   kind: 'bullet' | 'missile';
+  owner: number;
   x: number;
   y: number;
   vx: number;
@@ -121,6 +141,7 @@ export interface EnemyBolt {
 
 export interface Mine {
   uid: number;
+  owner: number;
   x: number;
   y: number;
   armT: number;
@@ -132,6 +153,7 @@ export interface Mine {
 
 export interface Shockwave {
   uid: number;
+  owner: number;
   x: number;
   y: number;
   r: number;
@@ -151,6 +173,8 @@ export interface Gem {
   vx: number;
   vy: number;
   magnet: boolean;
+  /** pid игрока, к которому примагнитился кристалл. */
+  magnetTo: number;
   magnetV: number;
   dead: boolean;
 }
@@ -165,15 +189,15 @@ export type GameEvent =
   | { t: 'boom'; x: number; y: number; r: number }
   | { t: 'mine'; x: number; y: number }
   | { t: 'gem'; x: number; y: number; kind: 'xp' | 'scrap' }
-  | { t: 'scrap'; amount: number }
-  | { t: 'blueprint'; x: number; y: number; partId: string }
-  | { t: 'damaged'; amount: number; hp: number }
-  | { t: 'blocked'; x: number; y: number }
-  | { t: 'shield'; x: number; y: number }
-  | { t: 'levelup'; level: number }
+  | { t: 'scrap'; amount: number; pid: number; x: number; y: number }
+  | { t: 'blueprint'; x: number; y: number; partId: string; pid: number }
+  | { t: 'damaged'; amount: number; hp: number; pid: number; x: number; y: number }
+  | { t: 'blocked'; x: number; y: number; pid: number }
+  | { t: 'shield'; x: number; y: number; pid: number }
+  | { t: 'levelup'; level: number; pid: number; x: number; y: number }
   | { t: 'bossWarn' }
   | { t: 'bossSpawn'; x: number; y: number }
-  | { t: 'died'; timeSec: number }
+  | { t: 'died'; timeSec: number; pid: number; x: number; y: number }
   | { t: 'won'; timeSec: number };
 
 export interface AggregatedStats {
@@ -190,31 +214,45 @@ export const DASH_CD = 4;
 export const SHIELD_CD = 12;
 export const SHIELD_DURATION = 3;
 
+/** Агрегированные статы игрока из пассивок + фиксированных бонусов сборки. */
+export function computeStats(
+  base: { baseSpeed: number; basePickup: number },
+  stacks: Partial<Record<PassiveId, number>>,
+  fixed: ModuleStats,
+): AggregatedStats {
+  const g = (id: PassiveId): number => stacks[id] ?? 0;
+  return {
+    speed: base.baseSpeed * (1 + 0.07 * g('moveSpeed')) * (1 + (fixed.moveSpeedPct ?? 0)),
+    damageMult: (1 + 0.12 * g('damage')) * (1 + (fixed.damagePct ?? 0)),
+    attackSpeedMult: (1 + 0.1 * g('attackSpeed')) * (1 + (fixed.attackSpeedPct ?? 0)),
+    areaMult: (1 + 0.12 * g('area')) * (1 + (fixed.areaPct ?? 0)),
+    pickupRadius: base.basePickup * (1 + 0.28 * g('pickup')) * (1 + (fixed.pickupPct ?? 0)),
+    critChance: 0.03 + 0.06 * g('crit') + (fixed.critChance ?? 0),
+    xpMult: (1 + 0.12 * g('xpGain')) * (1 + (fixed.xpPct ?? 0)),
+  };
+}
+
 export class RunSim {
   readonly halfW = 28;
   readonly halfH = 18;
   time = 0;
   state: 'running' | 'dead' | 'won' = 'running';
   kills = 0;
-  scrapCollected = 0;
   events: GameEvent[] = [];
-  pendingLevelUps = 0;
-  /** Чертежи, найденные за забег. */
-  foundBlueprints: string[] = [];
-  readonly weaponSlots: number;
+  /** Общий уровень команды (в соло — уровень игрока). */
+  level = 1;
+  xp = 0;
+  readonly players: Player[];
 
-  readonly player: Player;
-  private readonly start: RunStartConfig;
-  weapons: WeaponRuntime[] = [];
-  passiveStacks: Partial<Record<PassiveId, number>> = {};
+  boss: Enemy | null = null;
   enemies: Enemy[] = [];
   projectiles: Projectile[] = [];
   bolts: EnemyBolt[] = [];
   mines: Mine[] = [];
   shockwaves: Shockwave[] = [];
   gems: Gem[] = [];
-  boss: Enemy | null = null;
 
+  private readonly starts: RunStartConfig[];
   private readonly rng: Rng;
   private readonly spawner: Spawner;
   private readonly hash = new SpatialHash<Enemy>(2.5);
@@ -222,20 +260,48 @@ export class RunSim {
   private uid = 1;
   private bossSpawned = false;
   bossWarned = false;
+  /** Отладка: отключить спавн мобов (сетевые тесты). */
+  noSpawns = false;
 
-  constructor(start?: Partial<RunStartConfig>, seed?: number) {
-    this.start = { ...defaultStart(), ...start };
-    this.weaponSlots = this.start.weaponSlots;
+  /** Соло-совместимость: первый игрок, его оружие и пассивки. */
+  get player(): Player {
+    return this.players[0];
+  }
+  get weapons(): WeaponRuntime[] {
+    return this.players[0].weapons;
+  }
+  get passiveStacks(): Partial<Record<PassiveId, number>> {
+    return this.players[0].passiveStacks;
+  }
+  get scrapCollected(): number {
+    return this.players.reduce((s, p) => s + p.scrapCollected, 0);
+  }
+  get foundBlueprints(): string[] {
+    return this.players.flatMap((p) => p.foundBlueprints);
+  }
+
+  constructor(entries?: Partial<RunStartConfig> | PlayerEntry[], seed?: number) {
     this.rng = new Rng(seed);
     this.spawner = new Spawner(this.rng);
-    this.player = {
+    const list: PlayerEntry[] = Array.isArray(entries)
+      ? entries
+      : [{ id: 0, name: 'Пилот', colorIdx: 0, start: entries }];
+    this.starts = list.map((e) => ({ ...defaultStart(), ...e.start }));
+    this.players = list.map((e, i) => this.makePlayer(e, this.starts[i]));
+  }
+
+  private makePlayer(entry: PlayerEntry, start: RunStartConfig): Player {
+    const p: Player = {
+      id: entry.id,
+      name: entry.name,
+      colorIdx: entry.colorIdx,
       x: 0,
       y: 0,
-      hp: this.start.maxHp,
-      maxHp: this.start.maxHp,
-      baseSpeed: this.start.speed,
+      hp: start.maxHp,
+      maxHp: start.maxHp,
+      baseSpeed: start.speed,
       radius: 0.6,
-      basePickup: this.start.pickup,
+      basePickup: start.pickup,
       facingX: 0,
       facingY: 1,
       moving: false,
@@ -244,44 +310,59 @@ export class RunSim {
       dashT: 0,
       shieldCd: 0,
       shieldT: 0,
-      level: 1,
-      xp: 0,
+      dead: false,
+      weapons: [],
+      passiveStacks: {},
+      fixed: start.fixed,
+      weaponSlots: start.weaponSlots,
+      blueprintPool: start.blueprintPool,
+      scrapCollected: 0,
+      foundBlueprints: [],
+      pendingLevelUps: start.startLevelBonus,
     };
-    for (const w of this.start.weapons) {
-      if (this.weapons.some((x) => x.id === w.id)) continue;
-      this.weapons.push({ id: w.id, level: clamp(w.level, 1, WEAPONS[w.id]?.maxLevel ?? 8), cd: 0.3, angle: this.rng.angle(), drones: [] });
+    for (const w of start.weapons) {
+      if (p.weapons.some((x) => x.id === w.id)) continue;
+      p.weapons.push({ id: w.id, level: clamp(w.level, 1, WEAPONS[w.id]?.maxLevel ?? 8), cd: 0.3, angle: this.rng.angle(), drones: [] });
     }
-    this.pendingLevelUps = this.start.startLevelBonus;
+    return p;
   }
 
   // ---------- публичный API для main/рендера/тестов ----------
 
   stats(): AggregatedStats {
-    const s = this.passiveStacks;
-    const g = (id: PassiveId): number => s[id] ?? 0;
-    const f = this.start.fixed;
-    return {
-      speed: this.player.baseSpeed * (1 + 0.07 * g('moveSpeed')) * (1 + (f.moveSpeedPct ?? 0)),
-      damageMult: (1 + 0.12 * g('damage')) * (1 + (f.damagePct ?? 0)),
-      attackSpeedMult: (1 + 0.1 * g('attackSpeed')) * (1 + (f.attackSpeedPct ?? 0)),
-      areaMult: (1 + 0.12 * g('area')) * (1 + (f.areaPct ?? 0)),
-      pickupRadius: this.player.basePickup * (1 + 0.28 * g('pickup')) * (1 + (f.pickupPct ?? 0)),
-      critChance: 0.03 + 0.06 * g('crit') + (f.critChance ?? 0),
-      xpMult: (1 + 0.12 * g('xpGain')) * (1 + (f.xpPct ?? 0)),
-    };
+    return this.statsFor(this.player);
   }
 
-  addWeapon(id: WeaponId): void {
-    if (this.weapons.some((w) => w.id === id)) return;
-    this.weapons.push({ id, level: 1, cd: 0.3, angle: this.rng.angle(), drones: [] });
+  statsFor(p: Player): AggregatedStats {
+    return computeStats({ baseSpeed: p.baseSpeed, basePickup: p.basePickup }, p.passiveStacks, p.fixed);
   }
 
-  addPassiveStack(id: PassiveId): void {
-    this.passiveStacks[id] = (this.passiveStacks[id] ?? 0) + 1;
+  playerById(id: number): Player | undefined {
+    return this.players.find((p) => p.id === id);
+  }
+
+  alivePlayers(): Player[] {
+    return this.players.filter((p) => !p.dead);
+  }
+
+  addWeapon(id: WeaponId, p: Player = this.player): void {
+    if (p.weapons.some((w) => w.id === id)) return;
+    p.weapons.push({ id, level: 1, cd: 0.3, angle: this.rng.angle(), drones: [] });
+  }
+
+  addPassiveStack(id: PassiveId, p: Player = this.player): void {
+    p.passiveStacks[id] = (p.passiveStacks[id] ?? 0) + 1;
     if (id === 'maxHp') {
-      this.player.maxHp += 18;
-      this.player.hp = Math.min(this.player.maxHp, this.player.hp + 18);
+      p.maxHp += 18;
+      p.hp = Math.min(p.maxHp, p.hp + 18);
     }
+  }
+
+  /** Отключение игрока в сетевом забеге: бот погибает, забег продолжается. */
+  removePlayer(id: number): void {
+    const p = this.playerById(id);
+    if (!p || p.dead) return;
+    this.killPlayer(p);
   }
 
   spawnEnemy(id: EnemyId, x: number, y: number): Enemy {
@@ -334,13 +415,30 @@ export class RunSim {
     return best;
   }
 
+  nearestAlivePlayer(x: number, y: number): Player | null {
+    let best: Player | null = null;
+    let bestD2 = Infinity;
+    for (const p of this.players) {
+      if (p.dead) continue;
+      const dx = p.x - x;
+      const dy = p.y - y;
+      const d2 = dx * dx + dy * dy;
+      if (d2 < bestD2) {
+        bestD2 = d2;
+        best = p;
+      }
+    }
+    return best;
+  }
+
   // ---------- главный тик ----------
 
-  tick(dt: number, input: InputSnapshot): void {
+  tick(dt: number, input: InputSnapshot | InputSnapshot[]): void {
     if (this.state !== 'running') return;
     this.time += dt;
+    const inputs = Array.isArray(input) ? input : [input];
 
-    this.updatePlayer(dt, input);
+    this.updatePlayers(dt, inputs);
     this.rebuildHash();
     this.updateWeapons(dt);
     this.updateProjectiles(dt);
@@ -354,10 +452,17 @@ export class RunSim {
     this.compact();
   }
 
-  // ---------- игрок ----------
+  // ---------- игроки ----------
 
-  private updatePlayer(dt: number, input: InputSnapshot): void {
-    const p = this.player;
+  private updatePlayers(dt: number, inputs: InputSnapshot[]): void {
+    for (let i = 0; i < this.players.length; i++) {
+      const p = this.players[i];
+      if (p.dead) continue;
+      this.updatePlayer(p, dt, inputs[i] ?? { moveX: 0, moveY: 0, dash: false, shield: false });
+    }
+  }
+
+  private updatePlayer(p: Player, dt: number, input: InputSnapshot): void {
     p.dashCd = Math.max(0, p.dashCd - dt);
     p.shieldCd = Math.max(0, p.shieldCd - dt);
     p.dashT = Math.max(0, p.dashT - dt);
@@ -372,7 +477,7 @@ export class RunSim {
     if (input.shield && p.shieldCd <= 0) {
       p.shieldCd = SHIELD_CD;
       p.shieldT = SHIELD_DURATION;
-      this.events.push({ t: 'shield', x: p.x, y: p.y });
+      this.events.push({ t: 'shield', x: p.x, y: p.y, pid: p.id });
     }
 
     const dir = normalize(input.moveX, input.moveY);
@@ -381,25 +486,32 @@ export class RunSim {
       p.facingX = dir.x;
       p.facingY = dir.y;
     }
-    const speed = this.stats().speed * (p.dashT > 0 ? 3.8 : 1);
+    const speed = this.statsFor(p).speed * (p.dashT > 0 ? 3.8 : 1);
     p.x = clamp(p.x + dir.x * speed * dt, -this.halfW + 0.9, this.halfW - 0.9);
     p.y = clamp(p.y + dir.y * speed * dt, -this.halfH + 0.9, this.halfH - 0.9);
   }
 
-  private damagePlayer(amount: number): void {
-    const p = this.player;
-    if (this.state !== 'running') return;
+  damagePlayer(p: Player, amount: number): void {
+    if (this.state !== 'running' || p.dead) return;
     if (p.shieldT > 0) {
-      this.events.push({ t: 'blocked', x: p.x, y: p.y });
+      this.events.push({ t: 'blocked', x: p.x, y: p.y, pid: p.id });
       return;
     }
     if (p.iframe > 0 || p.dashT > 0) return;
     p.hp -= amount;
     p.iframe = 0.5;
-    this.events.push({ t: 'damaged', amount, hp: Math.max(0, p.hp) });
-    if (p.hp <= 0) {
+    this.events.push({ t: 'damaged', amount, hp: Math.max(0, p.hp), pid: p.id, x: p.x, y: p.y });
+    if (p.hp <= 0) this.killPlayer(p);
+  }
+
+  private killPlayer(p: Player): void {
+    if (p.dead) return;
+    p.dead = true;
+    p.hp = 0;
+    p.weapons.forEach((w) => (w.drones.length = 0));
+    this.events.push({ t: 'died', timeSec: this.time, pid: p.id, x: p.x, y: p.y });
+    if (this.players.every((x) => x.dead)) {
       this.state = 'dead';
-      this.events.push({ t: 'died', timeSec: this.time });
     }
   }
 
@@ -411,21 +523,23 @@ export class RunSim {
   }
 
   private updateWeapons(dt: number): void {
-    const st = this.stats();
-    for (const w of this.weapons) {
-      const s = WEAPONS[w.id].stats(w.level);
-      if (w.id === 'drones') {
-        this.updateDrones(w, s, st, dt);
-        continue;
+    for (const p of this.players) {
+      if (p.dead) continue;
+      const st = this.statsFor(p);
+      for (const w of p.weapons) {
+        const s = WEAPONS[w.id].stats(w.level);
+        if (w.id === 'drones') {
+          this.updateDrones(p, w, s, st, dt);
+          continue;
+        }
+        w.cd -= dt;
+        if (w.cd > 0) continue;
+        this.fireWeapon(p, w, s, st);
       }
-      w.cd -= dt;
-      if (w.cd > 0) continue;
-      this.fireWeapon(w, s, st);
     }
   }
 
-  private fireWeapon(w: WeaponRuntime, s: WeaponStats, st: AggregatedStats): void {
-    const p = this.player;
+  private fireWeapon(p: Player, w: WeaponRuntime, s: WeaponStats, st: AggregatedStats): void {
     switch (w.id) {
       case 'autogun': {
         const target = this.nearestEnemy(p.x, p.y, s.range);
@@ -440,6 +554,7 @@ export class RunSim {
           this.projectiles.push({
             uid: this.uid++,
             kind: 'bullet',
+            owner: p.id,
             x: p.x,
             y: p.y,
             vx: Math.cos(a) * s.speed,
@@ -480,12 +595,13 @@ export class RunSim {
         w.cd = s.cooldown / st.attackSpeedMult;
         const alive = this.enemies.filter((e) => !e.dead && e.spawnT <= 0.2);
         if (alive.length === 0) return;
-        alive.sort((a, b) => this.d2ToPlayer(a) - this.d2ToPlayer(b));
+        alive.sort((a, b) => this.d2To(a, p.x, p.y) - this.d2To(b, p.x, p.y));
         for (let i = 0; i < s.count; i++) {
           const off = this.rng.angle();
           this.projectiles.push({
             uid: this.uid++,
             kind: 'missile',
+            owner: p.id,
             x: p.x,
             y: p.y,
             vx: Math.cos(off) * 4,
@@ -505,6 +621,7 @@ export class RunSim {
         w.cd = s.cooldown / st.attackSpeedMult;
         this.shockwaves.push({
           uid: this.uid++,
+          owner: p.id,
           x: p.x,
           y: p.y,
           r: 0.3,
@@ -542,6 +659,7 @@ export class RunSim {
           const oy = this.rng.range(-0.8, 0.8);
           this.mines.push({
             uid: this.uid++,
+            owner: p.id,
             x: clamp(p.x + ox, -this.halfW + 0.5, this.halfW - 0.5),
             y: clamp(p.y + oy, -this.halfH + 0.5, this.halfH - 0.5),
             armT: 0.5,
@@ -557,8 +675,7 @@ export class RunSim {
     }
   }
 
-  private updateDrones(w: WeaponRuntime, s: WeaponStats, st: AggregatedStats, dt: number): void {
-    const p = this.player;
+  private updateDrones(p: Player, w: WeaponRuntime, s: WeaponStats, st: AggregatedStats, dt: number): void {
     w.angle += s.speed * dt;
     w.drones.length = 0;
     for (let i = 0; i < s.count; i++) {
@@ -580,18 +697,18 @@ export class RunSim {
     }
   }
 
-  private d2ToPlayer(e: Enemy): number {
-    const dx = e.x - this.player.x;
-    const dy = e.y - this.player.y;
+  private d2To(e: Enemy, x: number, y: number): number {
+    const dx = e.x - x;
+    const dy = e.y - y;
     return dx * dx + dy * dy;
   }
 
   // ---------- снаряды / мины / волны ----------
 
   private updateProjectiles(dt: number): void {
-    const st = this.stats();
     for (const pr of this.projectiles) {
       if (pr.dead) continue;
+      const st = this.statsFor(this.playerById(pr.owner) ?? this.player);
 
       if (pr.kind === 'missile') {
         const target = this.nearestEnemy(pr.x, pr.y, 14);
@@ -610,7 +727,7 @@ export class RunSim {
       pr.y += pr.vy * dt;
       pr.life -= dt;
       if (pr.life <= 0) {
-        if (pr.kind === 'missile' && pr.splash > 0) this.explode(pr.x, pr.y, pr.splash, pr.damage, st);
+        if (pr.kind === 'missile' && pr.splash > 0) this.explode(pr.x, pr.y, pr.splash, pr.damage, st, pr.owner);
         pr.dead = true;
         continue;
       }
@@ -624,12 +741,13 @@ export class RunSim {
         if (dx * dx + dy * dy > rr * rr) continue;
 
         if (pr.kind === 'missile') {
-          this.explode(pr.x, pr.y, pr.splash, pr.damage, st);
+          this.explode(pr.x, pr.y, pr.splash, pr.damage, st, pr.owner);
           pr.dead = true;
           break;
         }
         pr.hits.add(e.uid);
-        this.damageEnemy(e, pr.damage, st, this.player.x, this.player.y);
+        const owner = this.playerById(pr.owner) ?? this.player;
+        this.damageEnemy(e, pr.damage, st, owner.x, owner.y);
         pr.pierce--;
         if (pr.pierce < 0) {
           pr.dead = true;
@@ -639,20 +757,20 @@ export class RunSim {
     }
   }
 
-  private explode(x: number, y: number, radius: number, damage: number, st: AggregatedStats): void {
+  private explode(x: number, y: number, radius: number, damage: number, st: AggregatedStats, ownerId: number): void {
     const cand = this.hash.query(x, y, radius + 1.4, this.scratch);
+    const owner = this.playerById(ownerId);
     for (const e of cand) {
       if (e.dead) continue;
       const dx = e.x - x;
       const dy = e.y - y;
       const rr = radius + e.def.radius;
-      if (dx * dx + dy * dy <= rr * rr) this.damageEnemy(e, damage, st, x, y);
+      if (dx * dx + dy * dy <= rr * rr) this.damageEnemy(e, damage, st, owner?.x ?? x, owner?.y ?? y);
     }
     this.events.push({ t: 'boom', x, y, r: radius });
   }
 
   private updateBolts(dt: number): void {
-    const p = this.player;
     for (const b of this.bolts) {
       b.x += b.vx * dt;
       b.y += b.vy * dt;
@@ -661,18 +779,21 @@ export class RunSim {
         b.dead = true;
         continue;
       }
-      const dx = p.x - b.x;
-      const dy = p.y - b.y;
-      const rr = 0.28 + p.radius;
-      if (dx * dx + dy * dy <= rr * rr) {
-        b.dead = true;
-        this.damagePlayer(b.damage);
+      for (const p of this.players) {
+        if (p.dead) continue;
+        const dx = p.x - b.x;
+        const dy = p.y - b.y;
+        const rr = 0.28 + p.radius;
+        if (dx * dx + dy * dy <= rr * rr) {
+          b.dead = true;
+          this.damagePlayer(p, b.damage);
+          break;
+        }
       }
     }
   }
 
   private updateMines(dt: number): void {
-    const st = this.stats();
     for (const m of this.mines) {
       if (m.dead) continue;
       if (m.armT > 0) {
@@ -686,7 +807,8 @@ export class RunSim {
         const dy = e.y - m.y;
         const rr = m.trigger + e.def.radius;
         if (dx * dx + dy * dy <= rr * rr) {
-          this.explode(m.x, m.y, m.splash, m.damage, st);
+          const owner = this.playerById(m.owner) ?? this.player;
+          this.explode(m.x, m.y, m.splash, m.damage, this.statsFor(owner), m.owner);
           m.dead = true;
           break;
         }
@@ -695,10 +817,11 @@ export class RunSim {
   }
 
   private updateShockwaves(dt: number): void {
-    const st = this.stats();
     for (const sw of this.shockwaves) {
       if (sw.dead) continue;
       sw.r += sw.speed * dt;
+      const owner = this.playerById(sw.owner) ?? this.player;
+      const st = this.statsFor(owner);
       const cand = this.hash.query(sw.x, sw.y, sw.r + 1.4, this.scratch);
       for (const e of cand) {
         if (e.dead || sw.hit.has(e.uid)) continue;
@@ -715,7 +838,6 @@ export class RunSim {
   // ---------- мобы ----------
 
   private updateEnemies(dt: number): void {
-    const p = this.player;
     for (const e of this.enemies) {
       if (e.dead) continue;
       e.attackCd = Math.max(0, e.attackCd - dt);
@@ -723,8 +845,10 @@ export class RunSim {
       e.flashT = Math.max(0, e.flashT - dt);
       e.spawnT = Math.max(0, e.spawnT - dt);
 
-      const dx = p.x - e.x;
-      const dy = p.y - e.y;
+      const target = this.nearestAlivePlayer(e.x, e.y);
+      if (!target) continue;
+      const dx = target.x - e.x;
+      const dy = target.y - e.y;
       const d = Math.hypot(dx, dy) || 1;
       const nx = dx / d;
       const ny = dy / d;
@@ -787,13 +911,19 @@ export class RunSim {
         }
       }
 
-      // контактный урон
+      // контактный урон — любому игроку, которого коснулись
       if (e.spawnT <= 0 && e.attackCd <= 0) {
-        const rr = e.def.radius + p.radius;
-        if (d < rr) {
-          e.attackCd = e.def.attackCooldown;
-          if (p.shieldT > 0) this.events.push({ t: 'blocked', x: p.x, y: p.y });
-          else this.damagePlayer(e.def.contactDamage);
+        for (const p of this.players) {
+          if (p.dead) continue;
+          const pdx = p.x - e.x;
+          const pdy = p.y - e.y;
+          const rr = e.def.radius + p.radius;
+          if (pdx * pdx + pdy * pdy < rr * rr) {
+            e.attackCd = e.def.attackCooldown;
+            if (p.shieldT > 0) this.events.push({ t: 'blocked', x: p.x, y: p.y, pid: p.id });
+            else this.damagePlayer(p, e.def.contactDamage);
+            break;
+          }
         }
       }
     }
@@ -855,6 +985,7 @@ export class RunSim {
       vx: this.rng.range(-2, 2),
       vy: this.rng.range(-2, 2),
       magnet: false,
+      magnetTo: -1,
       magnetV: 0,
       dead: false,
     });
@@ -868,13 +999,13 @@ export class RunSim {
         vx: this.rng.range(-2, 2),
         vy: this.rng.range(-2, 2),
         magnet: false,
+        magnetTo: -1,
         magnetV: 0,
         dead: false,
       });
     }
-    // чертежи: гарантированно с босса, 25% с голема
-    const wantBlueprint =
-      this.start.blueprintPool.length > 0 && (e.def.id === 'boss' || (e.def.id === 'tank' && this.rng.chance(0.25)));
+    // чертежи: гарантированно с босса, 25% с голема (пул собирается на подборе)
+    const wantBlueprint = e.def.id === 'boss' || (e.def.id === 'tank' && this.rng.chance(0.25));
     if (wantBlueprint) {
       this.gems.push({
         uid: this.uid++,
@@ -885,6 +1016,7 @@ export class RunSim {
         vx: this.rng.range(-1.5, 1.5),
         vy: this.rng.range(-1.5, 1.5),
         magnet: false,
+        magnetTo: -1,
         magnetV: 0,
         dead: false,
       });
@@ -899,58 +1031,94 @@ export class RunSim {
   // ---------- спавн / опыт / босс ----------
 
   private updateSpawner(dt: number): void {
-    const reqs = this.spawner.update(dt, this.time, this.enemies.length, this.player.x, this.player.y, this.halfW, this.halfH);
+    if (this.noSpawns) return;
+    const alive = this.alivePlayers();
+    if (alive.length === 0) return;
+    const center = alive.length === 1 ? alive[0] : this.rng.pick(alive);
+    const reqs = this.spawner.update(dt, this.time, this.enemies.length, center.x, center.y, this.halfW, this.halfH);
     for (const r of reqs) this.spawnEnemy(r.id, r.x, r.y);
   }
 
   private updateGems(dt: number): void {
-    const p = this.player;
-    const st = this.stats();
-    const pickup = st.pickupRadius;
     for (const g of this.gems) {
       if (g.dead) continue;
-      const dx = p.x - g.x;
-      const dy = p.y - g.y;
-      const d = Math.hypot(dx, dy) || 1;
-      if (!g.magnet && d < pickup) g.magnet = true;
-      if (g.magnet) {
-        g.magnetV = Math.min(22, g.magnetV + 60 * dt);
-        g.x += (dx / d) * g.magnetV * dt;
-        g.y += (dy / d) * g.magnetV * dt;
-      } else {
+      let target = g.magnetTo >= 0 ? this.playerById(g.magnetTo) : undefined;
+      if (target?.dead) {
+        target = undefined;
+        g.magnet = false;
+        g.magnetTo = -1;
+        g.magnetV = 0;
+      }
+      if (!g.magnet) {
+        // магнитит ближайший игрок, в чей радиус подбора попал кристалл
+        let best: Player | null = null;
+        let bestD = Infinity;
+        for (const p of this.players) {
+          if (p.dead) continue;
+          const d = Math.hypot(p.x - g.x, p.y - g.y);
+          if (d < this.statsFor(p).pickupRadius && d < bestD) {
+            bestD = d;
+            best = p;
+          }
+        }
+        if (best) {
+          target = best;
+          g.magnet = true;
+          g.magnetTo = best.id;
+        }
+      }
+      if (!target) {
         g.x += g.vx * dt;
         g.y += g.vy * dt;
         const f = Math.max(0, 1 - 8 * dt);
         g.vx *= f;
         g.vy *= f;
+        continue;
       }
-      if (d < 0.5 + p.radius) {
+      const dx = target.x - g.x;
+      const dy = target.y - g.y;
+      const d = Math.hypot(dx, dy) || 1;
+      g.magnetV = Math.min(22, g.magnetV + 60 * dt);
+      g.x += (dx / d) * g.magnetV * dt;
+      g.y += (dy / d) * g.magnetV * dt;
+      if (d < 0.5 + target.radius) {
         g.dead = true;
-        if (g.kind === 'xp') {
-          this.events.push({ t: 'gem', x: g.x, y: g.y, kind: 'xp' });
-          this.gainXp(g.value * st.xpMult);
-        } else if (g.kind === 'scrap') {
-          const v = Math.max(1, Math.round(g.value * (1 + (this.start.fixed.scrapPct ?? 0))));
-          this.scrapCollected += v;
-          this.events.push({ t: 'scrap', amount: v });
-        } else {
-          const pool = this.start.blueprintPool;
-          const partId = pool[this.rng.int(pool.length)];
-          this.foundBlueprints.push(partId);
-          this.events.push({ t: 'blueprint', x: g.x, y: g.y, partId });
-        }
+        this.pickupGem(g, target);
       }
     }
   }
 
+  private pickupGem(g: Gem, p: Player): void {
+    const st = this.statsFor(p);
+    if (g.kind === 'xp') {
+      this.events.push({ t: 'gem', x: g.x, y: g.y, kind: 'xp' });
+      this.gainXp(g.value * st.xpMult);
+    } else if (g.kind === 'scrap') {
+      const v = Math.max(1, Math.round(g.value * (1 + (p.fixed.scrapPct ?? 0))));
+      p.scrapCollected += v;
+      this.events.push({ t: 'scrap', amount: v, pid: p.id, x: g.x, y: g.y });
+    } else {
+      let pool = p.blueprintPool;
+      if (pool.length === 0) {
+        pool = [...new Set(this.players.flatMap((x) => x.blueprintPool))];
+      }
+      if (pool.length === 0) return;
+      const partId = pool[this.rng.int(pool.length)];
+      p.foundBlueprints.push(partId);
+      this.events.push({ t: 'blueprint', x: g.x, y: g.y, partId, pid: p.id });
+    }
+  }
+
   private gainXp(v: number): void {
-    const p = this.player;
-    p.xp += v;
-    while (p.xp >= xpToNext(p.level)) {
-      p.xp -= xpToNext(p.level);
-      p.level++;
-      this.pendingLevelUps++;
-      this.events.push({ t: 'levelup', level: p.level });
+    this.xp += v;
+    while (this.xp >= xpToNext(this.level)) {
+      this.xp -= xpToNext(this.level);
+      this.level++;
+      for (const p of this.players) {
+        if (p.dead) continue;
+        p.pendingLevelUps++;
+        this.events.push({ t: 'levelup', level: this.level, pid: p.id, x: p.x, y: p.y });
+      }
     }
   }
 
@@ -961,9 +1129,9 @@ export class RunSim {
     }
     if (!this.bossSpawned && this.time >= 600) {
       this.bossSpawned = true;
-      const p = this.player;
-      const x = p.x > 0 ? -this.halfW + 4 : this.halfW - 4;
-      const y = clamp(p.y, -this.halfH + 4, this.halfH - 4);
+      const target = this.nearestAlivePlayer(0, 0) ?? this.player;
+      const x = target.x > 0 ? -this.halfW + 4 : this.halfW - 4;
+      const y = clamp(target.y, -this.halfH + 4, this.halfH - 4);
       this.spawnEnemy('boss', x, y);
     }
   }

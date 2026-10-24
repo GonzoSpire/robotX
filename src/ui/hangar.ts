@@ -15,6 +15,7 @@ interface PartSlotRef {
 
 export interface HangarCallbacks {
   onStartRun: () => void;
+  onOpenLobby: () => void;
 }
 
 const KIND_LABEL: Record<PartKind, string> = {
@@ -56,7 +57,10 @@ export class HangarScreen {
         <main class="hangar-tab" id="hangar-tab"></main>
         <footer class="hangar-footer">
           <div class="hangar-summary" id="hangar-summary"></div>
-          <button class="btn btn-primary" id="hangar-start">В ЗАБЕГ</button>
+          <div class="btn-row">
+            <button class="btn" id="hangar-net">СЕТЬ</button>
+            <button class="btn btn-primary" id="hangar-start">В ЗАБЕГ</button>
+          </div>
         </footer>
       </div>
       <div class="pick-modal" id="pick-modal" style="display:none">
@@ -82,6 +86,7 @@ export class HangarScreen {
     this.startBtn.addEventListener('click', () => {
       if (this.computeStats().valid) this.cb.onStartRun();
     });
+    this.must('hangar-net').addEventListener('click', () => this.cb.onOpenLobby());
     this.must('pick-close').addEventListener('click', () => this.closePick());
   }
 

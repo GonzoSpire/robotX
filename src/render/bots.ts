@@ -99,28 +99,28 @@ export function setFlash(view: BotView, k: number): void {
   }
 }
 
-/** Бот игрока: коробчатый мех ~1.5 высотой, лицом к +Z. */
-export function buildPlayerBot(): BotView {
+/** Бот игрока: коробчатый мех ~1.5 высотой, лицом к +Z. accent — цвет свечения игрока. */
+export function buildPlayerBot(accent = 0x3ef0d0): BotView {
   const group = new THREE.Group();
   const body = new THREE.Group();
   group.add(body);
 
   const shell = mat(0x5d6d7e);
   const dark = mat(0x2c3540);
-  const teal = mat(0x1f4d47, 0x3ef0d0, 0.9);
+  const glow = mat(0x1f4d47, accent, 0.9);
   const orange = mat(0x4a3520, 0xff9e3d, 0.7);
-  const mats = [shell, dark, teal, orange];
+  const mats = [shell, dark, glow, orange];
 
   part(body, boxGeo(0.22, 0.5, 0.3), dark, -0.19, 0.25, 0);
   part(body, boxGeo(0.22, 0.5, 0.3), dark, 0.19, 0.25, 0);
   part(body, boxGeo(0.72, 0.56, 0.52), shell, 0, 0.78, 0);
-  part(body, boxGeo(0.34, 0.22, 0.06), teal, 0, 0.82, 0.28);
+  part(body, boxGeo(0.34, 0.22, 0.06), glow, 0, 0.82, 0.28);
   part(body, boxGeo(0.26, 0.26, 0.4), dark, -0.52, 0.95, 0.02);
   part(body, boxGeo(0.26, 0.26, 0.4), dark, 0.52, 0.95, 0.02);
   part(body, boxGeo(0.12, 0.12, 0.52), orange, -0.52, 0.95, 0.3);
   part(body, boxGeo(0.12, 0.12, 0.52), orange, 0.52, 0.95, 0.3);
   part(body, boxGeo(0.36, 0.3, 0.36), shell, 0, 1.24, 0);
-  part(body, boxGeo(0.28, 0.09, 0.05), teal, 0, 1.26, 0.19);
+  part(body, boxGeo(0.28, 0.09, 0.05), glow, 0, 1.26, 0.19);
   part(body, boxGeo(0.03, 0.3, 0.03), dark, 0.12, 1.5, -0.08);
   part(body, boxGeo(0.06, 0.06, 0.06), orange, 0.12, 1.66, -0.08);
 
