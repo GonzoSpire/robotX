@@ -37,11 +37,21 @@ export function ringGeo(inner: number, outer: number, seg = 48): THREE.RingGeome
   return geo(`r${inner}|${outer}|${seg}`, () => new THREE.RingGeometry(inner, outer, seg));
 }
 
-/** Конус «вперёд» (+Z), основание в нуле — для огнемёта/ракет. */
+/** Конус «вперёд» (+Z), основание в нуле — для ракет. */
 export function forwardConeGeo(r: number, h: number): THREE.ConeGeometry {
   return geo(`f${r}|${h}`, () => {
     const g = new THREE.ConeGeometry(r, h, 12, 1, true);
     g.rotateX(Math.PI / 2);
+    g.translate(0, 0, h / 2);
+    return g;
+  });
+}
+
+/** Конус огнемёта (+Z): остриё в нуле, раскрывается к дальнему концу. */
+export function flameConeGeo(r: number, h: number): THREE.ConeGeometry {
+  return geo(`fl${r}|${h}`, () => {
+    const g = new THREE.ConeGeometry(r, h, 12, 1, true);
+    g.rotateX(-Math.PI / 2);
     g.translate(0, 0, h / 2);
     return g;
   });
