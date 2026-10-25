@@ -31,6 +31,7 @@ export class HostRun {
   private readonly rng = new Rng();
   private inputs = new Map<number, InputSnapshot>();
   private netEvents: GameEvent[] = [];
+  private localEvents: GameEvent[] = [];
   private offers = new Map<number, Card[]>();
   private snapshotAcc = 0;
   private tickCount = 0;
@@ -48,30 +49,35 @@ export class HostRun {
     this.ctx.use(this);
   }
 
-  /** Фиксированный тик: свой ввод + последний ввод каждого клиента. */
+  /**
+   * Фиксированный тик: свой ввод + последний ввод каждого клиента.
+   * Здесь же — рассылка снапшотов и карточки: тики идут от Web Worker,
+   * поэтому фоновая вкладка хоста не замораживает сетевой забег.
+   */
   fixedTick(dt: number, own: InputSnapshot): void {
-    if (this.sim.state !== 'running') return;
+    if (this.ended || this.sim.state !== 'running') return;
     this.inputs.set(0, own);
     const inputs = this.sim.players.map((p) => this.inputs.get(p.id) ?? IDLE);
     this.sim.tick(dt, inputs);
     this.tickCount++;
-  }
 
-  /** Кадр рендера: события для локального рендера + рассылка снапшотов. */
-  frame(dt: number): GameEvent[] {
     const events = this.sim.drainEvents();
     this.netEvents.push(...events);
-    if (this.sim.state === 'running') {
-      this.snapshotAcc += dt;
-      if (this.snapshotAcc >= SNAPSHOT_INTERVAL) {
-        this.snapshotAcc = 0;
-        this.flushSnapshot();
-      }
-      this.pumpLevelUps();
-    } else if (!this.ended) {
-      this.finish();
+    this.localEvents.push(...events);
+    this.snapshotAcc += dt;
+    if (this.snapshotAcc >= SNAPSHOT_INTERVAL) {
+      this.snapshotAcc = 0;
+      this.flushSnapshot();
     }
-    return events;
+    this.pumpLevelUps();
+    if (this.sim.state !== 'running') this.finish();
+  }
+
+  /** Кадр рендера: отдаёт копящиеся события локальной сцене. */
+  frame(): GameEvent[] {
+    const out = this.localEvents;
+    this.localEvents = [];
+    return out;
   }
 
   /** Выбор карточки (свой робот или валидированный выбор клиента). */

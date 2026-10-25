@@ -443,6 +443,10 @@ export class ClientRunView implements RunView {
         p.weapons.push(w);
       }
       w.level = sw.level;
+      if (sw.id !== 'drones') {
+        w.drones.length = 0;
+        continue;
+      }
       // снапшот авторитетен для уровня; угол крутим сами
       if (Math.abs(((w.angle - sw.angle + Math.PI * 3) % (Math.PI * 2)) - Math.PI) > 0.7) w.angle = sw.angle;
       const s = WEAPONS[sw.id].stats(sw.level);

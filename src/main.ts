@@ -287,7 +287,7 @@ class GameApp {
   }
 
   private runView(): { view: RunView; events: GameEvent[] } | null {
-    if (this.netRole === 'host' && this.hostRun) return { view: this.hostRun.sim, events: this.hostRun.frame(this.lastFrameDt) };
+    if (this.netRole === 'host' && this.hostRun) return { view: this.hostRun.sim, events: this.hostRun.frame() };
     if (this.netRole === 'client' && this.clientRun) return { view: this.clientRun.view, events: this.clientRun.frame(this.lastFrameDt) };
     if (this.netRole === 'none' && this.sim) return { view: this.sim, events: this.sim.drainEvents() };
     return null;
