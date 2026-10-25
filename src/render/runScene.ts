@@ -7,6 +7,7 @@ import {
   boxGeo,
   buildEnemyBot,
   buildPlayerBot,
+  flameConeGeo,
   forwardConeGeo,
   octaGeo,
   ringGeo,
@@ -649,7 +650,7 @@ export class RunScene {
   private spawnBeam(x1: number, y1: number, x2: number, y2: number, w: number): void {
     let fx = this.beams.find((b) => b.t >= b.dur);
     if (!fx) {
-      if (this.beams.length > 5) return;
+      if (this.beams.length > 10) return;
       const mat = new THREE.MeshBasicMaterial({
         color: 0x8ef2ff,
         transparent: true,
@@ -661,39 +662,40 @@ export class RunScene {
       fx = { mesh, mat, t: 0, dur: 1 };
     }
     fx.t = 0;
-    fx.dur = 0.14;
+    fx.dur = 0.2;
     const dx = x2 - x1;
     const dy = y2 - y1;
     const len = Math.hypot(dx, dy);
     fx.mesh.position.set((x1 + x2) / 2, 0.9, (y1 + y2) / 2);
     fx.mesh.rotation.y = Math.atan2(-dy, dx);
     fx.mesh.scale.set(len, w, w);
-    fx.mat.opacity = 0.95;
+    fx.mat.opacity = 0;
     fx.mesh.visible = true;
   }
 
   private spawnFlame(x: number, y: number, dx: number, dy: number, range: number): void {
     let fx = this.flames.find((f) => f.t >= f.dur);
     if (!fx) {
-      if (this.flames.length > 4) return;
+      if (this.flames.length > 10) return;
       const mat = new THREE.MeshBasicMaterial({
         color: 0xff8c3b,
         transparent: true,
-        opacity: 0.4,
+        opacity: 0,
         blending: THREE.AdditiveBlending,
         depthWrite: false,
         side: THREE.DoubleSide,
       });
-      const mesh = new THREE.Mesh(forwardConeGeo(1, 1), mat);
+      const mesh = new THREE.Mesh(flameConeGeo(1, 1), mat);
       this.scene.add(mesh);
       fx = { mesh, mat, t: 0, dur: 1 };
     }
     fx.t = 0;
-    fx.dur = 0.22;
-    fx.mesh.position.set(x, 0.8, y);
+    // дольше кулдауна огнемёта (0.22с): конусы перекрываются, пламя не стробит
+    fx.dur = 0.34;
+    fx.mesh.position.set(x + dx * 0.5, 0.8, y + dy * 0.5);
     fx.mesh.rotation.y = Math.atan2(dx, dy);
     fx.mesh.scale.set(range * 0.55, range * 0.55, range);
-    fx.mat.opacity = 0.42;
+    fx.mat.opacity = 0;
     fx.mesh.visible = true;
   }
 
@@ -732,7 +734,7 @@ export class RunScene {
         continue;
       }
       b.t += dt;
-      b.mat.opacity = 0.95 * (1 - clamp(b.t / b.dur, 0, 1));
+      b.mat.opacity = 0.55 * envelope(clamp(b.t / b.dur, 0, 1), 0.3);
     }
     for (const f of this.flames) {
       if (f.t >= f.dur) {
@@ -740,7 +742,7 @@ export class RunScene {
         continue;
       }
       f.t += dt;
-      f.mat.opacity = 0.42 * (1 - clamp(f.t / f.dur, 0, 1));
+      f.mat.opacity = 0.3 * envelope(clamp(f.t / f.dur, 0, 1), 0.3);
     }
   }
 
@@ -779,4 +781,9 @@ function disposeMaterials(root: THREE.Object3D): void {
       else m.dispose();
     }
   });
+}
+
+/** Огибающая вспышки: плавный разгон и мягкое затухание вместо резкого стробирования. */
+function envelope(k: number, attack: number): number {
+  return k < attack ? k / attack : 1 - (k - attack) / (1 - attack);
 }
